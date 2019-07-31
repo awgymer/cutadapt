@@ -349,11 +349,13 @@ class AdapterParser:
         function is a generator.
         """
         if spec.startswith('file:'):
-            # read adapter sequences from a file
-            with FastaReader(spec[5:]) as fasta:
+            f_name, sep, pars = spec[5:].partition(';')
+            with FastaReader(f_name) as fasta:
                 for record in fasta:
-                    name = record.name.split(None, 1)[0]
-                    yield self._parse(record.sequence, cmdline_type, name=name)
+                    name = record.name.split(None, 1)
+                    name = name[0] if name else None
+                    seq = record.sequence + sep + pars
+                    yield self._parse(seq, cmdline_type, name=name)
         else:
             yield self._parse(spec, cmdline_type, name=None)
 
