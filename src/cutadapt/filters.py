@@ -13,7 +13,8 @@ filters is created and each redirector is called in turn until one returns True.
 The read is then assumed to have been "consumed", that is, either written
 somewhere or filtered (should be discarded).
 """
-import dnaio
+from abc import ABC, abstractmethod
+
 
 # Constants used when returning from a Filter’s __call__ method to improve
 # readability (it is unintuitive that "return True" means "discard the read").
@@ -21,7 +22,19 @@ DISCARD = True
 KEEP = False
 
 
-class NoFilter:
+class SingleEndFilter(ABC):
+    @abstractmethod
+    def __call__(self, read, matches):
+        pass
+
+
+class PairedEndFilter(ABC):
+    @abstractmethod
+    def __call__(self, read1, matches1, read2, matches2):
+        pass
+
+
+class NoFilter(SingleEndFilter):
     """
     No filtering, just send each read to the given writer.
     """
@@ -41,7 +54,7 @@ class NoFilter:
         return DISCARD
 
 
-class PairedNoFilter:
+class PairedNoFilter(PairedEndFilter):
     """
     No filtering, just send each paired-end read to the given writer.
     """
@@ -62,11 +75,11 @@ class PairedNoFilter:
         return DISCARD
 
 
-class Redirector:
+class Redirector(SingleEndFilter):
     """
     Redirect discarded reads to the given writer. This is for single-end reads.
     """
-    def __init__(self, writer, filter, filter2=None):
+    def __init__(self, writer, filter: SingleEndFilter, filter2=None):
         # TODO filter2 should really not be here
         self.filtered = 0
         self.writer = writer
@@ -85,7 +98,7 @@ class Redirector:
         return KEEP
 
 
-class PairedRedirector:
+class PairedRedirector(PairedEndFilter):
     """
     Redirect paired-end reads matching a filtering criterion to a writer.
     Different filtering styles are supported, differing by which of the
@@ -96,9 +109,7 @@ class PairedRedirector:
         pair_filter_mode -- these values are allowed:
             'any': The pair is discarded if any read matches.
             'both': The pair is discarded if both reads match.
-            'first': The pair is discarded if the first read matches
-                ('legacy' mode, backwards compatibility). With 'first', the
-                second read is not inspected.
+            'first': The pair is discarded if the first read matches.
         """
         if pair_filter_mode not in ('any', 'both', 'first'):
             raise ValueError("pair_filter_mode must be 'any', 'both' or 'first'")
@@ -143,7 +154,7 @@ class PairedRedirector:
         return KEEP
 
 
-class TooShortReadFilter:
+class TooShortReadFilter(SingleEndFilter):
     def __init__(self, minimum_length):
         self.minimum_length = minimum_length
 
@@ -151,7 +162,7 @@ class TooShortReadFilter:
         return len(read) < self.minimum_length
 
 
-class TooLongReadFilter:
+class TooLongReadFilter(SingleEndFilter):
     def __init__(self, maximum_length):
         self.maximum_length = maximum_length
 
@@ -159,7 +170,7 @@ class TooLongReadFilter:
         return len(read) > self.maximum_length
 
 
-class NContentFilter:
+class NContentFilter(SingleEndFilter):
     """
     Discards a reads that has a number of 'N's over a given threshold. It handles both raw counts
     of Ns as well as proportions. Note, for raw counts, it is a 'greater than' comparison,
@@ -185,7 +196,7 @@ class NContentFilter:
             return n_count > self.cutoff
 
 
-class DiscardUntrimmedFilter:
+class DiscardUntrimmedFilter(SingleEndFilter):
     """
     Return True if read is untrimmed.
     """
@@ -193,7 +204,7 @@ class DiscardUntrimmedFilter:
         return not matches
 
 
-class DiscardTrimmedFilter:
+class DiscardTrimmedFilter(SingleEndFilter):
     """
     Return True if read is trimmed.
     """
@@ -201,7 +212,7 @@ class DiscardTrimmedFilter:
         return bool(matches)
 
 
-class CasavaFilter:
+class CasavaFilter(SingleEndFilter):
     """
     Remove reads that fail the CASAVA filter. These have header lines that
     look like ``xxxx x:Y:x:x`` (with a ``Y``). Reads that pass the filter
@@ -214,13 +225,13 @@ class CasavaFilter:
         return right[1:4] == ':Y:'  # discard if :Y: found
 
 
-class Demultiplexer:
+class Demultiplexer(SingleEndFilter):
     """
     Demultiplex trimmed reads. Reads are written to different output files
     depending on which adapter matches. Files are created when the first read
     is written to them.
     """
-    def __init__(self, path_template, untrimmed_path, qualities):
+    def __init__(self, path_template, untrimmed_path, qualities, file_opener):
         """
         path_template must contain the string '{name}', which will be replaced
         with the name of the adapter to form the final output path.
@@ -235,6 +246,7 @@ class Demultiplexer:
         self.written = 0
         self.written_bp = [0, 0]
         self.qualities = qualities
+        self.file_opener = file_opener
 
     def __call__(self, read, matches):
         """
@@ -243,15 +255,15 @@ class Demultiplexer:
         if matches:
             name = matches[-1].adapter.name
             if name not in self.writers:
-                self.writers[name] = dnaio.open(self.template.replace('{name}', name),
-                    mode='w', qualities=self.qualities)
+                self.writers[name] = self.file_opener.dnaio_open_raise_limit(
+                    self.template.replace('{name}', name), self.qualities)
             self.written += 1
             self.written_bp[0] += len(read)
             self.writers[name].write(read)
         else:
             if self.untrimmed_writer is None and self.untrimmed_path is not None:
-                self.untrimmed_writer = dnaio.open(self.untrimmed_path,
-                    mode='w', qualities=self.qualities)
+                self.untrimmed_writer = self.file_opener.dnaio_open_raise_limit(
+                    self.untrimmed_path, self.qualities)
             if self.untrimmed_writer is not None:
                 self.written += 1
                 self.written_bp[0] += len(read)
@@ -265,22 +277,22 @@ class Demultiplexer:
             self.untrimmed_writer.close()
 
 
-class PairedEndDemultiplexer:
+class PairedDemultiplexer(PairedEndFilter):
     """
     Demultiplex trimmed paired-end reads. Reads are written to different output files
     depending on which adapter (in read 1) matches.
     """
     def __init__(self, path_template, path_paired_template, untrimmed_path, untrimmed_paired_path,
-            qualities):
+            qualities, file_opener):
         """
         The path templates must contain the string '{name}', which will be replaced
         with the name of the adapter to form the final output path.
         Read pairs without an adapter match are written to the files named by
         untrimmed_path.
         """
-        self._demultiplexer1 = Demultiplexer(path_template, untrimmed_path, qualities)
+        self._demultiplexer1 = Demultiplexer(path_template, untrimmed_path, qualities, file_opener)
         self._demultiplexer2 = Demultiplexer(path_paired_template, untrimmed_paired_path,
-            qualities)
+            qualities, file_opener)
 
     @property
     def written(self):
@@ -297,10 +309,75 @@ class PairedEndDemultiplexer:
 
     def close(self):
         self._demultiplexer1.close()
-        self._demultiplexer1.close()
+        self._demultiplexer2.close()
 
 
-class RestFileWriter:
+class CombinatorialDemultiplexer(PairedEndFilter):
+    """
+    Demultiplex reads depending on which adapter matches, taking into account both matches
+    on R1 and R2.
+    """
+    def __init__(self, path_template, path_paired_template, untrimmed_name, qualities, file_opener):
+        """
+        path_template must contain the string '{name1}' and '{name2}', which will be replaced
+        with the name of the adapters found on R1 and R2, respectively to form the final output
+        path. For reads without an adapter match, the name1 and/or name2 are set to the string
+        specified by untrimmed_name. Alternatively, untrimmed_name can be set to None; in that
+        case, read pairs for which at least one read does not have an adapter match are
+        discarded.
+        """
+        assert '{name1}' in path_template and '{name2}' in path_template
+        assert '{name1}' in path_paired_template and '{name2}' in path_paired_template
+        self.template = path_template
+        self.paired_template = path_paired_template
+        self.untrimmed_name = untrimmed_name
+        self.writers = dict()
+        self.written = 0
+        self.written_bp = [0, 0]
+        self.qualities = qualities
+        self.file_opener = file_opener
+
+    @staticmethod
+    def _make_path(template, name1, name2):
+        return template.replace('{name1}', name1).replace('{name2}', name2)
+
+    def __call__(self, read1, read2, matches1, matches2):
+        """
+        Write the read to the proper output file according to the most recent matches both on
+        R1 and R2
+        """
+        assert read2 is not None
+        name1 = matches1[-1].adapter.name if matches1 else None
+        name2 = matches2[-1].adapter.name if matches2 else None
+        key = (name1, name2)
+        if key not in self.writers:
+            if name1 is None:
+                name1 = self.untrimmed_name
+            if name2 is None:
+                name2 = self.untrimmed_name
+            if name1 is None or name2 is None:
+                return DISCARD
+            path1 = self._make_path(self.template, name1, name2)
+            path2 = self._make_path(self.paired_template, name1, name2)
+            self.writers[key] = (
+                self.file_opener.dnaio_open_raise_limit(path1, qualities=self.qualities),
+                self.file_opener.dnaio_open_raise_limit(path2, qualities=self.qualities),
+            )
+        writer1, writer2 = self.writers[key]
+        self.written += 1
+        self.written_bp[0] += len(read1)
+        self.written_bp[1] += len(read2)
+        writer1.write(read1)
+        writer2.write(read2)
+        return DISCARD
+
+    def close(self):
+        for w1, w2 in self.writers.values():
+            w1.close()
+            w2.close()
+
+
+class RestFileWriter(SingleEndFilter):
     def __init__(self, file):
         self.file = file
 
@@ -312,7 +389,7 @@ class RestFileWriter:
         return KEEP
 
 
-class WildcardFileWriter:
+class WildcardFileWriter(SingleEndFilter):
     def __init__(self, file):
         self.file = file
 
@@ -322,7 +399,7 @@ class WildcardFileWriter:
         return KEEP
 
 
-class InfoFileWriter:
+class InfoFileWriter(SingleEndFilter):
     def __init__(self, file):
         self.file = file
 

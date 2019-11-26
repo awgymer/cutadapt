@@ -1,15 +1,13 @@
-from textwrap import dedent
 import pytest
 
 from dnaio import Sequence
-from cutadapt.adapters import (Adapter, Match, FRONT, BACK, PREFIX,
-    expand_braces, LinkedAdapter, AdapterStatistics, AdapterParser, ANYWHERE)
+from cutadapt.adapters import Adapter, Match, Where, LinkedAdapter
 
 
 def test_issue_52():
     adapter = Adapter(
         sequence='GAACTCCAGTCACNNNNN',
-        where=BACK,
+        where=Where.BACK,
         remove='suffix',
         max_error_rate=0.12,
         min_overlap=5,
@@ -46,7 +44,7 @@ def test_issue_80():
 
     adapter = Adapter(
         sequence="TCGTATGCCGTCTTC",
-        where=BACK,
+        where=Where.BACK,
         remove='suffix',
         max_error_rate=0.2,
         min_overlap=3,
@@ -60,34 +58,14 @@ def test_issue_80():
 
 
 def test_str():
-    a = Adapter('ACGT', where=BACK, remove='suffix', max_error_rate=0.1)
+    a = Adapter('ACGT', where=Where.BACK, remove='suffix', max_error_rate=0.1)
     str(a)
     str(a.match_to(Sequence(name='seq', sequence='TTACGT')))
 
 
-def test_expand_braces():
-    assert expand_braces('') == ''
-    assert expand_braces('A') == 'A'
-    assert expand_braces('A{0}') == ''
-    assert expand_braces('A{1}') == 'A'
-    assert expand_braces('A{2}') == 'AA'
-    assert expand_braces('A{2}C') == 'AAC'
-    assert expand_braces('ACGTN{3}TGACCC') == 'ACGTNNNTGACCC'
-    assert expand_braces('ACGTN{10}TGACCC') == 'ACGTNNNNNNNNNNTGACCC'
-    assert expand_braces('ACGTN{3}TGA{4}CCC') == 'ACGTNNNTGAAAACCC'
-    assert expand_braces('ACGTN{0}TGA{4}CCC') == 'ACGTTGAAAACCC'
-
-
-def test_expand_braces_fail():
-    for expression in ['{', '}', '{}', '{5', '{1}', 'A{-7}', 'A{', 'A{1', 'N{7', 'AN{7', 'A{4{}',
-            'A{4}{3}', 'A{b}', 'A{6X}', 'A{X6}']:
-        with pytest.raises(ValueError):
-            expand_braces(expression)
-
-
 def test_linked_adapter():
-    front_adapter = Adapter('AAAA', where=PREFIX, min_overlap=4)
-    back_adapter = Adapter('TTTT', where=BACK, min_overlap=3)
+    front_adapter = Adapter('AAAA', where=Where.PREFIX, min_overlap=4)
+    back_adapter = Adapter('TTTT', where=Where.BACK, min_overlap=3)
 
     linked_adapter = LinkedAdapter(
         front_adapter, back_adapter, front_required=True, back_required=False, name='name')
@@ -103,7 +81,7 @@ def test_linked_adapter():
 def test_info_record():
     adapter = Adapter(
         sequence='GAACTCCAGTCACNNNNN',
-        where=BACK,
+        where=Where.BACK,
         max_error_rate=0.12,
         min_overlap=5,
         read_wildcards=False,
@@ -121,29 +99,29 @@ def test_info_record():
         'GAACTACAGTCCCGGC',
         '',
         'Foo',
-        '', 
-        '', 
-        ''
+        '',
+        '',
+        '',
     )
 
 
 def test_random_match_probabilities():
-    a = Adapter('A', where=BACK, max_error_rate=0.1).create_statistics()
+    a = Adapter('A', where=Where.BACK, max_error_rate=0.1).create_statistics()
     assert a.back.random_match_probabilities(0.5) == [1, 0.25]
     assert a.back.random_match_probabilities(0.2) == [1, 0.4]
 
     for s in ('ACTG', 'XMWH'):
-        a = Adapter(s, where=BACK, max_error_rate=0.1).create_statistics()
+        a = Adapter(s, where=Where.BACK, max_error_rate=0.1).create_statistics()
         assert a.back.random_match_probabilities(0.5) == [1, 0.25, 0.25**2, 0.25**3, 0.25**4]
         assert a.back.random_match_probabilities(0.2) == [1, 0.4, 0.4*0.1, 0.4*0.1*0.4, 0.4*0.1*0.4*0.1]
 
-    a = Adapter('GTCA', where=FRONT, max_error_rate=0.1).create_statistics()
+    a = Adapter('GTCA', where=Where.FRONT, max_error_rate=0.1).create_statistics()
     assert a.front.random_match_probabilities(0.5) == [1, 0.25, 0.25**2, 0.25**3, 0.25**4]
     assert a.front.random_match_probabilities(0.2) == [1, 0.4, 0.4*0.1, 0.4*0.1*0.4, 0.4*0.1*0.4*0.1]
 
 
 def test_add_adapter_statistics():
-    stats = Adapter('A', name='name', where=BACK, max_error_rate=0.1).create_statistics()
+    stats = Adapter('A', name='name', where=Where.BACK, max_error_rate=0.1).create_statistics()
     end_stats = stats.back
     end_stats.adjacent_bases['A'] = 7
     end_stats.adjacent_bases['C'] = 19
@@ -158,7 +136,7 @@ def test_add_adapter_statistics():
     end_stats.errors[20][1] = 66
     end_stats.errors[20][2] = 6
 
-    stats2 = Adapter('A', name='name', where=BACK, max_error_rate=0.1).create_statistics()
+    stats2 = Adapter('A', name='name', where=Where.BACK, max_error_rate=0.1).create_statistics()
     end_stats2 = stats2.back
     end_stats2.adjacent_bases['A'] = 43
     end_stats2.adjacent_bases['C'] = 31
@@ -186,94 +164,15 @@ def test_add_adapter_statistics():
 def test_issue_265():
     """Crash when accessing the matches property of non-anchored linked adapters"""
     s = Sequence('name', 'AAAATTTT')
-    front_adapter = Adapter('GGG', where=FRONT)
-    back_adapter = Adapter('TTT', where=BACK)
+    front_adapter = Adapter('GGG', where=Where.FRONT)
+    back_adapter = Adapter('TTT', where=Where.BACK)
     la = LinkedAdapter(front_adapter, back_adapter, front_required=False, back_required=False, name='name')
     assert la.match_to(s).matches == 3
 
 
-def test_parse_file_notation(tmpdir):
-    tmp_path = str(tmpdir.join('adapters.fasta'))
-    with open(tmp_path, 'w') as f:
-        f.write(dedent(""">first_name
-            ADAPTER1
-            >second_name
-            ADAPTER2
-            """))
-    parser = AdapterParser(
-        max_error_rate=0.2, min_overlap=4, read_wildcards=False,
-        adapter_wildcards=False, indels=False)
-
-    adapters = list(parser.parse('file:' + tmp_path, cmdline_type='back'))
-    assert len(adapters) == 2
-    assert adapters[0].name == 'first_name'
-    assert adapters[0].sequence == 'ADAPTER1'
-    assert adapters[1].name == 'second_name'
-    assert adapters[1].sequence == 'ADAPTER2'
-    for a in adapters:
-        assert a.max_error_rate == 0.2
-        assert a.min_overlap == 4
-        assert not a.read_wildcards
-        assert not a.adapter_wildcards
-        assert not a.indels
-
-
-def test_parse_not_linked():
-    p = AdapterParser._parse_not_linked
-    assert p('A', 'front') == (None, None, 'A', {})
-    assert p('A', 'back') == (None, None, 'A', {})
-    assert p('A', 'anywhere') == (None, None, 'A', {})
-    assert p('^A', 'front') == (None, 'anchored', 'A', {})
-    assert p('XXXA', 'front') == (None, 'noninternal', 'A', {})
-    assert p('A$', 'back') == (None, 'anchored', 'A', {})
-    assert p('AXXXX', 'back') == (None, 'noninternal', 'A', {})
-    assert p('a_name=ADAPT', 'front') == ('a_name', None, 'ADAPT', {})
-
-
-def test_parse_parameters():
-    p = AdapterParser._parse_parameters
-    assert p('e=0.1') == {'max_error_rate': 0.1}
-    assert p('error_rate=0.1') == {'max_error_rate': 0.1}
-    assert p('o=5') == {'min_overlap': 5}
-    assert p('min_overlap=5') == {'min_overlap': 5}
-    assert p('o=7; e=0.4') == {'min_overlap': 7, 'max_error_rate': 0.4}
-    assert p('anywhere') == {'anywhere': True}
-
-    with pytest.raises(ValueError):
-        p('e=hallo')
-    with pytest.raises(KeyError):
-        p('bla=0.1')
-    with pytest.raises(ValueError):
-        p('e=')
-
-
-def test_parse_with_parameters():
-    parser = AdapterParser(
-        max_error_rate=0.2, min_overlap=4, read_wildcards=False,
-        adapter_wildcards=False, indels=False)
-    a = parser._parse('ACGTACGT; e=0.15', 'front')
-    assert a.max_error_rate == 0.15
-    assert a.min_overlap == 4
-
-    a = parser._parse('ACGTAAAA; o=5; e=0.11', 'back')
-    assert a.max_error_rate == 0.11
-    assert a.min_overlap == 5
-
-    for spec in ('thename=ACG;e=0.15 ... TGT;e=0.17', 'thename=ACG;e=0.15...TGT;e=0.17'):
-        a = parser._parse(spec, 'back')
-        assert isinstance(a, LinkedAdapter)
-        assert a.front_adapter.max_error_rate == 0.15
-        assert a.back_adapter.max_error_rate == 0.17
-
-
-def test_anywhere_parameter():
-    parser = AdapterParser(max_error_rate=0.2, min_overlap=4, read_wildcards=False,
-        adapter_wildcards=False, indels=True)
-    adapter = list(parser.parse('CTGAAGTGAAGTACACGGTT;anywhere', 'back'))[0]
-    assert adapter.remove == 'suffix'
-    assert adapter.where == ANYWHERE
-    read = Sequence('foo1', 'TGAAGTACACGGTTAAAAAAAAAA')
-    from cutadapt.modifiers import AdapterCutter
-    cutter = AdapterCutter([adapter])
-    trimmed_read = cutter(read, [])
-    assert trimmed_read.sequence == ''
+@pytest.mark.parametrize("where", [Where.PREFIX, Where.SUFFIX])
+def test_no_indels_empty_read(where):
+    # Issue #376
+    adapter = Adapter('ACGT', where=where, indels=False)
+    empty = Sequence('name', '')
+    adapter.match_to(empty)

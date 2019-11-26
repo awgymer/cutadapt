@@ -1,115 +1,132 @@
 # TODO
-# test with the --output option
 # test reading from standard input
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 from io import StringIO
 import pytest
+import subprocess
 
 from cutadapt.__main__ import main
-from utils import run, assert_files_equal, datapath, cutpath, redirect_stderr, temporary_path
+from utils import assert_files_equal, datapath, cutpath, redirect_stderr
 
-import pytest_timeout as _unused
+# pytest.mark.timeout will not fail even if pytest-timeout is not installed
+try:
+    import pytest_timeout as _unused
+except ImportError:  # pragma: no cover
+    raise ImportError("pytest_timeout needs to be installed")
 del _unused
 
 
-def test_example():
+def test_example(run):
     run('-N -b ADAPTER', 'example.fa', 'example.fa')
 
 
-def test_small():
-    run('-b TTAGACATATCTCCGTCG', 'small.fastq', 'small.fastq')
+def test_compressed_fasta(run):
+    run("", "simple.fasta", "simple.fasta.gz")
 
 
-def test_empty():
+def test_small(run):
+    run('-a TTAGACATATCTCCGTCG', 'small.fastq', 'small.fastq')
+
+
+def test_empty(run, cores):
     """empty input"""
-    run('-a TTAGACATATCTCCGTCG', 'empty.fastq', 'empty.fastq')
+    run("--cores {} -a TTAGACATATCTCCGTCG".format(cores), "empty.fastq", "empty.fastq")
 
 
-def test_newlines():
+def test_newlines(run):
     """DOS/Windows newlines"""
-    run('-e 0.12 -b TTAGACATATCTCCGTCG', 'dos.fastq', 'dos.fastq')
+    run('-e 0.12 -a TTAGACATATCTCCGTCG', 'dos.fastq', 'dos.fastq')
 
 
-def test_lowercase():
+def test_lowercase(run):
     """lowercase adapter"""
-    run('-b ttagacatatctccgtcg', 'lowercase.fastq', 'small.fastq')
+    run('-a ttagacatatctccgtcg', 'lowercase.fastq', 'small.fastq')
 
 
-def test_rest():
+def test_rest(run, tmpdir, cores):
     """-r/--rest-file"""
-    with temporary_path('rest.tmp') as rest_tmp:
-        run(['-b', 'ADAPTER', '-N', '-r', rest_tmp], "rest.fa", "rest.fa")
-        assert_files_equal(datapath('rest.txt'), rest_tmp)
+    rest = str(tmpdir.join("rest.tmp"))
+    run(['--cores', str(cores), '-b', 'ADAPTER', '-N', '-r', rest], "rest.fa", "rest.fa")
+    assert_files_equal(datapath('rest.txt'), rest)
 
 
-def test_restfront():
-    with temporary_path("rest.txt") as path:
-        run(['-g', 'ADAPTER', '-N', '-r', path], "restfront.fa", "rest.fa")
-        assert_files_equal(datapath('restfront.txt'), path)
+def test_restfront(run, tmpdir):
+    path = str(tmpdir.join("rest.txt"))
+    run(['-g', 'ADAPTER', '-N', '-r', path], "restfront.fa", "rest.fa")
+    assert_files_equal(datapath('restfront.txt'), path)
 
 
-def test_discard():
+def test_discard(run):
     """--discard"""
     run("-b TTAGACATATCTCCGTCG --discard", "discard.fastq", "small.fastq")
 
 
-def test_discard_untrimmed():
+def test_discard_untrimmed(run):
     """--discard-untrimmed"""
     run('-b CAAGAT --discard-untrimmed', 'discard-untrimmed.fastq', 'small.fastq')
 
 
 @pytest.mark.skip(reason='Regression since switching to dnaio')
-def test_second_header_retained(cores):
+def test_second_header_retained(run, cores):
     """test if sequence name after the "+" is retained"""
     run("--cores {} -e 0.12 -b TTAGACATATCTCCGTCG".format(cores), "plus.fastq", "plus.fastq")
 
 
 @pytest.mark.skip(reason='Regression since switching to dnaio')
-def test_length_tag_second_header(cores):
+def test_length_tag_second_header(run, cores):
     """Ensure --length-tag= also modifies the second header line"""
     run("--cores {} -a GGCTTC --length-tag=length=".format(cores),
         'SRR2040271_1.fastq', 'SRR2040271_1.fastq')
 
 
-def test_extensiontxtgz():
+def test_extensiontxtgz(run):
     """automatic recognition of "_sequence.txt.gz" extension"""
     run("-b TTAGACATATCTCCGTCG", "s_1_sequence.txt", "s_1_sequence.txt.gz")
 
 
-def test_format():
+def test_format(run):
     """the -f/--format parameter"""
     run("-f fastq -b TTAGACATATCTCCGTCG", "small.fastq", "small.myownextension")
 
 
-def test_minimum_length():
+def test_minimum_length(run):
     """-m/--minimum-length"""
     run("-m 5 -a TTAGACATATCTCCGTCG", "minlen.fa", "lengths.fa")
 
 
-def test_too_short(tmpdir):
+def test_too_short(run, tmpdir, cores):
     """--too-short-output"""
     too_short_path = str(tmpdir.join('tooshort.fa'))
-    run("-m 5 -a TTAGACATATCTCCGTCG --too-short-output " + too_short_path, "minlen.fa", "lengths.fa")
+    run([
+        "--cores", str(cores),
+        "-m", "5",
+        "-a", "TTAGACATATCTCCGTCG",
+        "--too-short-output", too_short_path
+    ], "minlen.fa", "lengths.fa")
     assert_files_equal(datapath('tooshort.fa'), too_short_path)
 
 
-def test_maximum_length():
+def test_maximum_length(run):
     """-M/--maximum-length"""
     run("-M 5 -a TTAGACATATCTCCGTCG", "maxlen.fa", "lengths.fa")
 
 
-def test_too_long(tmpdir):
+def test_too_long(run, tmpdir, cores):
     """--too-long-output"""
     too_long_path = str(tmpdir.join('toolong.fa'))
-    run("-M 5 -a TTAGACATATCTCCGTCG --too-long-output " + too_long_path, "maxlen.fa", "lengths.fa")
+    run([
+        "--cores", str(cores),
+        "-M", "5",
+        "-a", "TTAGACATATCTCCGTCG",
+        "--too-long-output", too_long_path
+    ], "maxlen.fa", "lengths.fa")
     assert_files_equal(datapath('toolong.fa'), too_long_path)
 
 
-def test_length_tag():
+def test_length_tag(run):
     """454 data; -n and --length-tag"""
     run("-n 3 -e 0.1 --length-tag length= "
         "-b TGAGACACGCAACAGGGGAAAGGCAAGGCACACAGGGGATAGG "
@@ -132,208 +149,211 @@ def test_overlap_a(tmpdir, length):
     assert expected == output.read()
 
 
-def test_overlap_b():
+def test_overlap_b(run):
     """-O/--overlap with -b"""
     run("-O 10 -b TTAGACATATCTCCGTCG", "overlapb.fa", "overlapb.fa")
 
 
-def test_qualtrim():
+def test_qualtrim(run):
     """-q with low qualities"""
     run("-q 10 -a XXXXXX", "lowqual.fastq", "lowqual.fastq")
 
 
-def test_qualbase():
+def test_qualbase(run):
     """-q with low qualities, using ascii(quality+64) encoding"""
     run("-q 10 --quality-base 64 -a XXXXXX", "illumina64.fastq", "illumina64.fastq")
 
 
-def test_quality_trim_only():
+def test_quality_trim_only(run):
     """only trim qualities, do not remove adapters"""
     run("-q 10 --quality-base 64", "illumina64.fastq", "illumina64.fastq")
 
 
-def test_twoadapters():
+def test_twoadapters(run):
     """two adapters"""
     run("-a AATTTCAGGAATT -a GTTCTCTAGTTCT", "twoadapters.fasta", "twoadapters.fasta")
 
 
-def test_polya():
+def test_polya(run):
     """poly-A tails"""
     run("-m 24 -O 10 -a AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "polya.fasta", "polya.fasta")
 
 
-def test_polya_brace_notation():
+def test_polya_brace_notation(run):
     """poly-A tails"""
     run("-m 24 -O 10 -a A{35}", "polya.fasta", "polya.fasta")
 
 
 # the same as --action=none
-def test_no_trim():
+def test_no_trim(run):
     run("--no-trim --discard-untrimmed -a CCCTAGTTAAAC", 'no-trim.fastq', 'small.fastq')
 
 
-def test_action_none():
+def test_action_none(run):
     run("--action=none --discard-untrimmed -a CCCTAGTTAAAC", 'no-trim.fastq', 'small.fastq')
 
 
 # the same as --action=mask
-def test_mask_adapter():
+def test_mask_adapter(run):
     """mask adapter with N (reads maintain the same length)"""
     run("-b CAAG -n 3 --mask-adapter", "anywhere_repeat.fastq", "anywhere_repeat.fastq")
 
 
-def test_action_mask():
+def test_action_mask(run):
     """mask adapter with N (reads maintain the same length)"""
     run("-b CAAG -n 3 --action=mask", "anywhere_repeat.fastq", "anywhere_repeat.fastq")
 
 
-def test_gz_multiblock():
+def test_action_lowercase(run):
+    run("-b CAAG -n 3 --action=lowercase", "action_lowercase.fasta", "action_lowercase.fasta")
+
+
+def test_gz_multiblock(run):
     """compressed gz file with multiple blocks (created by concatenating two .gz files)"""
     run("-b TTAGACATATCTCCGTCG", "small.fastq", "multiblock.fastq.gz")
 
 
 @pytest.mark.parametrize("opt", ["-y", "--suffix"])
-def test_suffix(opt):
+def test_suffix(opt, run):
     """-y/--suffix parameter"""
     run([opt, ' {name}', '-e', '0', '-a', 'OnlyT=TTTTTTTT', '-a', 'OnlyG=GGGGGGGG'], "suffix.fastq", "suffix.fastq")
 
 
-def test_read_wildcard():
+def test_read_wildcard(run):
     """test wildcards in reads"""
     run("--match-read-wildcards -b ACGTACGT", "wildcard.fa", "wildcard.fa")
 
 
-def test_adapter_wildcard():
+@pytest.mark.parametrize("adapter_type,expected", [
+    ("-a", "wildcard_adapter.fa"),
+    ("-b", "wildcard_adapter_anywhere.fa"),
+])
+def test_adapter_wildcard(adapter_type, expected, run, tmpdir, cores):
     """wildcards in adapter"""
-    for adapter_type, expected in (
-            ("-a", "wildcard_adapter.fa"),
-            ("-b", "wildcard_adapter_anywhere.fa")):
-        with temporary_path("wildcardtmp.txt") as wildcardtmp:
-            run("--wildcard-file {0} {1} ACGTNNNACGT".format(wildcardtmp, adapter_type),
-                expected, "wildcard_adapter.fa")
-            with open(wildcardtmp) as wct:
-                lines = wct.readlines()
-            lines = [ line.strip() for line in lines ]
-            assert lines == ['AAA 1', 'GGG 2', 'CCC 3b', 'TTT 4b']
+    wildcard_path = str(tmpdir.join("wildcards.txt"))
+    run([
+            "--cores", str(cores),
+            "--wildcard-file", wildcard_path,
+            adapter_type, "ACGTNNNACGT"
+        ],  expected, "wildcard_adapter.fa")
+    with open(wildcard_path) as wct:
+        lines = wct.readlines()
+    lines = [line.strip() for line in lines]
+    assert lines == ["AAA 1", "GGG 2", "CCC 3b", "TTT 4b"]
 
 
-def test_wildcard_N():
+def test_wildcard_N(run):
     """test 'N' wildcard matching with no allowed errors"""
     run("-e 0 -a GGGGGGG --match-read-wildcards", "wildcardN.fa", "wildcardN.fa")
 
 
-def test_illumina_adapter_wildcard():
+def test_illumina_adapter_wildcard(run):
     run("-a VCCGAMCYUCKHRKDCUBBCNUWNSGHCGU", "illumina.fastq", "illumina.fastq.gz")
 
 
-def test_adapter_front():
+def test_adapter_front(run):
     """test adapter in front"""
     run("--front ADAPTER -N", "examplefront.fa", "example.fa")
 
 
-def test_literal_N():
+def test_literal_N(run):
     """test matching literal 'N's"""
     run("-N -e 0.2 -a NNNNNNNNNNNNNN", "trimN3.fasta", "trimN3.fasta")
 
 
-def test_literal_N2():
+def test_literal_N2(run):
     run("-N -O 1 -g NNNNNNNNNNNNNN", "trimN5.fasta", "trimN5.fasta")
 
 
-def test_literal_N_brace_notation():
+def test_literal_N_brace_notation(run):
     """test matching literal 'N's"""
     run("-N -e 0.2 -a N{14}", "trimN3.fasta", "trimN3.fasta")
 
 
-def test_literal_N2_brace_notation():
+def test_literal_N2_brace_notation(run):
     run("-N -O 1 -g N{14}", "trimN5.fasta", "trimN5.fasta")
 
 
-def test_anchored_front():
+def test_anchored_front(run):
     run("-g ^FRONTADAPT -N", "anchored.fasta", "anchored.fasta")
 
 
-def test_anchored_front_ellipsis_notation():
-    run("-a FRONTADAPT... -N", "anchored.fasta", "anchored.fasta")
+def test_anchored_front_ellipsis_notation(run):
+    run("-a ^FRONTADAPT... -N", "anchored.fasta", "anchored.fasta")
 
 
-def test_anchored_back():
+def test_anchored_back(run):
     run("-a BACKADAPTER$ -N", "anchored-back.fasta", "anchored-back.fasta")
 
 
-def test_anchored_back_ellipsis_notation():
+def test_anchored_back_ellipsis_notation(run):
     run("-a ...BACKADAPTER$ -N", "anchored-back.fasta", "anchored-back.fasta")
 
 
-def test_anchored_back_no_indels():
+def test_anchored_back_no_indels(run):
     run("-a BACKADAPTER$ -N --no-indels", "anchored-back.fasta", "anchored-back.fasta")
 
 
-def test_no_indels():
+def test_no_indels(run):
     run('-a TTAGACATAT -g GAGATTGCCA --no-indels', 'no_indels.fasta', 'no_indels.fasta')
 
 
-def test_ellipsis_notation():
+def test_ellipsis_notation(run):
     run('-a ...TTAGACATAT -g GAGATTGCCA --no-indels', 'no_indels.fasta', 'no_indels.fasta')
 
 
-def test_issue_46():
+def test_issue_46(run, tmpdir):
     """issue 46 - IndexError with --wildcard-file"""
-    with temporary_path("wildcardtmp.txt") as wildcardtmp:
-        run("--anywhere=AACGTN --wildcard-file={0}".format(wildcardtmp), "issue46.fasta", "issue46.fasta")
+    run("--anywhere=AACGTN --wildcard-file={}".format(
+        tmpdir.join("wildcards.txt")), "issue46.fasta", "issue46.fasta")
 
 
-def test_strip_suffix():
+def test_strip_suffix(run):
     run("--strip-suffix _sequence -a XXXXXXX", "stripped.fasta", "simple.fasta")
 
 
-def test_info_file():
+def test_info_file(run, tmpdir, cores):
     # The true adapter sequence in the illumina.fastq.gz data set is
-    # GCCTAACTTCTTAGACTGCCTTAAGGACGT (fourth base is different)
-    #
-    with temporary_path("infotmp.txt") as infotmp:
-        run(["--info-file", infotmp, '-a', 'adapt=GCCGAACTTCTTAGACTGCCTTAAGGACGT'],
-            "illumina.fastq", "illumina.fastq.gz")
-        assert_files_equal(cutpath('illumina.info.txt'), infotmp)
+    # GCCTAACTTCTTAGACTGCCTTAAGGACGT (fourth base is different from the sequence shown here)
+    info_path = str(tmpdir.join("info.txt"))
+    run(["--cores", str(cores), "--info-file", info_path, "-a", "adapt=GCCGAACTTCTTAGACTGCCTTAAGGACGT"],
+        "illumina.fastq", "illumina.fastq.gz")
+    assert_files_equal(cutpath("illumina.info.txt"), info_path)
 
 
-def test_info_file_times():
-    with temporary_path("infotmp.txt") as infotmp:
-        run(["--info-file", infotmp, '--times', '2', '-a', 'adapt=GCCGAACTTCTTA',
-            '-a', 'adapt2=GACTGCCTTAAGGACGT'], "illumina5.fastq", "illumina5.fastq")
-        assert_files_equal(cutpath('illumina5.info.txt'), infotmp)
+def test_info_file_times(run, tmpdir, cores):
+    info_path = str(tmpdir.join("info.txt"))
+    run(["--cores", str(cores), "--info-file", info_path, "--times", "2", "-a", "adapt=GCCGAACTTCTTA",
+        "-a", "adapt2=GACTGCCTTAAGGACGT"], "illumina5.fastq", "illumina5.fastq")
+    assert_files_equal(cutpath('illumina5.info.txt'), info_path)
 
 
-def test_info_file_fasta():
-    with temporary_path("infotmp.txt") as infotmp:
-        # Just make sure that it runs
-        run(['--info-file', infotmp, '-a', 'TTAGACATAT', '-g', 'GAGATTGCCA', '--no-indels'], 'no_indels.fasta', 'no_indels.fasta')
+def test_info_file_fasta(run, tmpdir, cores):
+    info_path = str(tmpdir.join("info.txt"))
+    # Just make sure that it runs
+    run(["--cores", str(cores), "--info-file", info_path, "-a", "TTAGACATAT", "-g", "GAGATTGCCA", "--no-indels"],
+        "no_indels.fasta", "no_indels.fasta")
 
 
-def test_named_adapter():
+def test_named_adapter(run):
     run("-a MY_ADAPTER=GCCGAACTTCTTAGACTGCCTTAAGGACGT", "illumina.fastq", "illumina.fastq.gz")
 
 
-def test_adapter_with_u():
+def test_adapter_with_u(run):
     run("-a GCCGAACUUCUUAGACUGCCUUAAGGACGU", "illumina.fastq", "illumina.fastq.gz")
 
 
-def test_bzip2():
+def test_bzip2(run):
     run('-b TTAGACATATCTCCGTCG', 'small.fastq', 'small.fastq.bz2')
 
 
 if sys.version_info[:2] >= (3, 3):
-    def test_bzip2_multiblock():
+    def test_bzip2_multiblock(run):
         run('-b TTAGACATATCTCCGTCG', 'small.fastq', 'multiblock.fastq.bz2')
 
 
-try:
-    import lzma
-
-    def test_xz():
-        run('-b TTAGACATATCTCCGTCG', 'small.fastq', 'small.fastq.xz')
-except ImportError:
-    pass
+def test_xz(run):
+    run('-b TTAGACATATCTCCGTCG', 'small.fastq', 'small.fastq.xz')
 
 
 def test_no_args():
@@ -348,63 +368,79 @@ def test_two_fastqs():
             main([datapath('paired.1.fastq'), datapath('paired.2.fastq')])
 
 
-def test_anchored_no_indels():
+def test_anchored_no_indels(run):
     """anchored 5' adapter, mismatches only (no indels)"""
     run('-g ^TTAGACATAT --no-indels -e 0.1', 'anchored_no_indels.fasta', 'anchored_no_indels.fasta')
 
 
-def test_anchored_no_indels_wildcard_read():
+def test_anchored_no_indels_wildcard_read(run):
     """anchored 5' adapter, mismatches only (no indels), but wildcards in the read count as matches"""
-    run('-g ^TTAGACATAT --match-read-wildcards --no-indels -e 0.1', 'anchored_no_indels_wildcard.fasta', 'anchored_no_indels.fasta')
+    run('-g ^TTAGACATAT --match-read-wildcards --no-indels -e 0.1',
+        'anchored_no_indels_wildcard.fasta', 'anchored_no_indels.fasta')
 
 
-def test_anchored_no_indels_wildcard_adapt():
+def test_anchored_no_indels_wildcard_adapt(run):
     """anchored 5' adapter, mismatches only (no indels), but wildcards in the adapter count as matches"""
-    run('-g ^TTAGACANAT --no-indels -e 0.1', 'anchored_no_indels.fasta', 'anchored_no_indels.fasta')
+    run('-g ^TTAGACANAT --no-indels -e 0.12', 'anchored_no_indels.fasta', 'anchored_no_indels.fasta')
 
 
-def test_non_iupac_characters():
+def test_non_iupac_characters(run):
     with pytest.raises(SystemExit):
         with redirect_stderr():
             main(['-a', 'ZACGT', datapath('small.fastq')])
 
 
-def test_unconditional_cut_front():
+def test_unconditional_cut_front(run):
     run('-u 5', 'unconditional-front.fastq', 'small.fastq')
 
 
-def test_unconditional_cut_back():
+def test_unconditional_cut_back(run):
     run('-u -5', 'unconditional-back.fastq', 'small.fastq')
 
 
-def test_unconditional_cut_both():
+def test_unconditional_cut_both(run):
     run('-u -5 -u 5', 'unconditional-both.fastq', 'small.fastq')
 
 
-def test_untrimmed_output():
-    with temporary_path('untrimmed.tmp.fastq') as tmp:
-        run(['-a', 'TTAGACATATCTCCGTCG', '--untrimmed-output', tmp], 'small.trimmed.fastq', 'small.fastq')
-        assert_files_equal(cutpath('small.untrimmed.fastq'), tmp)
+def test_unconditional_cut_too_many_commas():
+    with pytest.raises(SystemExit):
+        main(["-u", "5,7,8", datapath("small.fastq")])
 
 
-def test_adapter_file():
+def test_unconditional_cut_invalid_number():
+    with pytest.raises(SystemExit):
+        main(["-u", "a,b", datapath("small.fastq")])
+
+
+def test_untrimmed_output(run, cores, tmpdir):
+    path = str(tmpdir.join("untrimmed.fastq"))
+    run(["--cores", str(cores), "-a", "TTAGACATATCTCCGTCG", "--untrimmed-output", path],
+        "small.trimmed.fastq", "small.fastq")
+    assert_files_equal(cutpath("small.untrimmed.fastq"), path)
+
+
+def test_adapter_file(run):
     run('-a file:' + datapath('adapter.fasta'), 'illumina.fastq', 'illumina.fastq.gz')
 
 
-def test_adapter_file_5p_anchored():
+def test_adapter_file_5p_anchored(run):
     run('-N -g file:' + datapath('prefix-adapter.fasta'), 'anchored.fasta', 'anchored.fasta')
 
 
-def test_adapter_file_3p_anchored():
+def test_adapter_file_3p_anchored(run):
     run('-N -a file:' + datapath('suffix-adapter.fasta'), 'anchored-back.fasta', 'anchored-back.fasta')
 
 
-def test_adapter_file_5p_anchored_no_indels():
+def test_adapter_file_5p_anchored_no_indels(run):
     run('-N --no-indels -g file:' + datapath('prefix-adapter.fasta'), 'anchored.fasta', 'anchored.fasta')
 
 
-def test_adapter_file_3p_anchored_no_indels():
+def test_adapter_file_3p_anchored_no_indels(run):
     run('-N --no-indels -a file:' + datapath('suffix-adapter.fasta'), 'anchored-back.fasta', 'anchored-back.fasta')
+
+
+def test_adapter_file_empty_name(run):
+    run('-N -a file:' + datapath('adapter-empty-name.fasta'), 'illumina.fastq', 'illumina.fastq.gz')
 
 
 def test_demultiplex():
@@ -418,7 +454,27 @@ def test_demultiplex():
     shutil.rmtree(tempdir)
 
 
-def test_max_n():
+def test_multiple_fake_anchored_adapters(run):
+    run("-g ^CGTCCGAAGTAGC -g ^ATTGCCCTAG "
+        "-a TTCCATGCAGCATT$ -a CCAGTCCCCCC$ "
+        "-a GCCGAACTTCTTAGACTGCCTTAAGGACGT",
+        "illumina.fastq",
+        "illumina.fastq.gz")
+
+
+def test_multiple_prefix_adapters(run):
+    run("-g ^GTACGGATTGTTCAGTA -g ^TATTAAGCTCATTC", "multiprefix.fasta", "multi.fasta")
+
+
+def test_multiple_prefix_adapters_noindels(run):
+    run("--no-indels -g ^GTACGGATTGTTCAGTA -g ^TATTAAGCTCATTC", "multiprefix.fasta", "multi.fasta")
+
+
+def test_multiple_suffix_adapters_noindels(run):
+    run("--no-indels -a CGTGATTATCTTGC$ -a CCTATTAGTGGTTGAAC$", "multisuffix.fasta", "multi.fasta")
+
+
+def test_max_n(run):
     run('--max-n 0', 'maxn0.fasta', 'maxn.fasta')
     run('--max-n 1', 'maxn1.fasta', 'maxn.fasta')
     run('--max-n 2', 'maxn2.fasta', 'maxn.fasta')
@@ -446,35 +502,31 @@ def test_x_brace_notation():
     main(['-o', '/dev/null', '--quiet', '-a', 'X{5}', datapath('small.fastq')])
 
 
-def test_nextseq():
+def test_nextseq(run):
     run('--nextseq-trim 22', 'nextseq.fastq', 'nextseq.fastq')
 
 
-def test_linked():
-    run('-a AAAAAAAAAA...TTTTTTTTTT', 'linked.fasta', 'linked.fasta')
-
-
-def test_linked_explicitly_anchored():
+def test_linked_explicitly_anchored(run):
     run('-a ^AAAAAAAAAA...TTTTTTTTTT', 'linked.fasta', 'linked.fasta')
 
 
-def test_linked_multiple():
-    run('-a AAAAAAAAAA...TTTTTTTTTT -a AAAAAAAAAA...GCGCGCGCGC', 'linked.fasta', 'linked.fasta')
+def test_linked_multiple(run):
+    run('-a ^AAAAAAAAAA...TTTTTTTTTT -a ^AAAAAAAAAA...GCGCGCGCGC', 'linked.fasta', 'linked.fasta')
 
 
-def test_linked_both_anchored():
-    run('-a AAAAAAAAAA...TTTTT$', 'linked-anchored.fasta', 'linked.fasta')
+def test_linked_both_anchored(run):
+    run('-a ^AAAAAAAAAA...TTTTT$', 'linked-anchored.fasta', 'linked.fasta')
 
 
-def test_linked_5p_not_anchored():
+def test_linked_5p_not_anchored(run):
     run('-g AAAAAAAAAA...TTTTTTTTTT', 'linked-not-anchored.fasta', 'linked.fasta')
 
 
-def test_linked_discard_untrimmed():
-    run('-a AAAAAAAAAA...TTTTTTTTTT --discard-untrimmed', 'linked-discard.fasta', 'linked.fasta')
+def test_linked_discard_untrimmed(run):
+    run('-a ^AAAAAAAAAA...TTTTTTTTTT --discard-untrimmed', 'linked-discard.fasta', 'linked.fasta')
 
 
-def test_linked_discard_untrimmed_g():
+def test_linked_discard_untrimmed_g(run):
     run('-g AAAAAAAAAA...TTTTTTTTTT --discard-untrimmed', 'linked-discard-g.fasta', 'linked.fasta')
 
 
@@ -496,19 +548,19 @@ def test_anywhere_anchored_3p():
             main(['-b', 'TTT$', datapath('small.fastq')])
 
 
-def test_fasta():
+def test_fasta(run):
     run('-a TTAGACATATCTCCGTCG', 'small.fasta', 'small.fastq')
 
 
-def test_fasta_no_trim():
+def test_fasta_no_trim(run):
     run([], 'small-no-trim.fasta', 'small.fastq')
 
 
-def test_length():
+def test_length(run):
     run('--length 5', 'shortened.fastq', 'small.fastq')
 
 
-def test_negative_length():
+def test_negative_length(run):
     run('--length -5', 'shortened-negative.fastq', 'small.fastq')
 
 
@@ -529,27 +581,117 @@ def test_issue_296(tmpdir):
     assert_files_equal(reads_path, out_path)
 
 
-def test_xadapter():
+def test_xadapter(run):
     run('-g XTCCGAATAGA', 'xadapter.fasta', 'xadapterx.fasta')
 
 
-def test_adapterx():
+def test_adapterx(run):
     run('-a TCCGAATAGAX', 'adapterx.fasta', 'xadapterx.fasta')
 
 
-def test_discard_casava():
+def test_discard_casava(run):
     run('--discard-casava', 'casava.fastq', 'casava.fastq')
 
 
-def test_underscore():
+def test_underscore(run):
     """File name ending in _fastq.gz (issue #275)"""
     run('-b TTAGACATATCTCCGTCG', 'small.fastq', 'underscore_fastq.gz')
 
 
-def test_cores_autodetect():
+def test_cores_autodetect(run):
     # Just make sure that it runs; functionality is not tested
     run('--cores 0 -b TTAGACATATCTCCGTCG', 'small.fastq', 'underscore_fastq.gz')
 
 
 def test_write_compressed_fastq(cores, tmpdir):
     main(['--cores', str(cores), '-o', str(tmpdir.join('out.fastq.gz')), datapath('small.fastq')])
+
+
+def test_minimal_report(run):
+    run('-b TTAGACATATCTCCGTCG --report=minimal', 'small.fastq', 'small.fastq')
+
+
+def test_paired_separate(run):
+    """test separate trimming of paired-end reads"""
+    run("-a TTAGACATAT", "paired-separate.1.fastq", "paired.1.fastq")
+    run("-a CAGTGGAGTA", "paired-separate.2.fastq", "paired.2.fastq")
+
+
+def test_run_as_module():
+    """Check that "python3 -m cutadapt ..." works"""
+    import subprocess
+    from cutadapt import __version__
+    py = subprocess.Popen([sys.executable, "-m", "cutadapt", "--version"], stdout=subprocess.PIPE)
+    assert py.communicate()[0].decode().strip() == __version__
+
+
+def test_standard_input_pipe(tmpdir, cores):
+    """Read FASTQ from standard input"""
+
+    import subprocess
+    out_path = str(tmpdir.join("out.fastq"))
+    in_path = datapath("small.fastq")
+    # Use 'cat' to simulate that no file name is available for stdin
+    cat = subprocess.Popen(["cat", in_path], stdout=subprocess.PIPE)
+    py = subprocess.Popen([
+        sys.executable, "-m", "cutadapt", "--cores", str(cores),
+        "-a", "TTAGACATATCTCCGTCG", "-o", out_path, "-"],
+        stdin=cat.stdout)
+    _ = py.communicate()
+    cat.stdout.close()
+    _ = py.communicate()[0]
+    assert_files_equal(cutpath("small.fastq"), out_path)
+
+
+def test_standard_output(tmpdir, cores):
+    """Write FASTQ to standard output (not using --output/-o option)"""
+
+    import subprocess
+    out_path = str(tmpdir.join("out.fastq"))
+    with open(out_path, "w") as out_file:
+        py = subprocess.Popen([
+            sys.executable, "-m", "cutadapt", "--cores", str(cores),
+            "-a", "TTAGACATATCTCCGTCG", datapath("small.fastq")],
+            stdout=out_file)
+        _ = py.communicate()
+    assert_files_equal(cutpath("small.fastq"), out_path)
+
+
+def test_explicit_standard_output(tmpdir, cores):
+    """Write FASTQ to standard output (using "-o -")"""
+
+    out_path = str(tmpdir.join("out.fastq"))
+    with open(out_path, "w") as out_file:
+        py = subprocess.Popen([
+            sys.executable, "-m", "cutadapt", "-o", "-", "--cores", str(cores),
+            "-a", "TTAGACATATCTCCGTCG", datapath("small.fastq")],
+            stdout=out_file)
+        _ = py.communicate()
+    assert_files_equal(cutpath("small.fastq"), out_path)
+
+
+def test_force_fasta_output(tmpdir, cores):
+    """Write FASTA to standard output even on FASTQ input"""
+
+    out_path = str(tmpdir.join("out.fasta"))
+    with open(out_path, "w") as out_file:
+        py = subprocess.Popen([
+            sys.executable, "-m", "cutadapt", "--fasta", "-o", "-", "--cores", str(cores),
+            "-a", "TTAGACATATCTCCGTCG", datapath("small.fastq")],
+            stdout=out_file)
+        _ = py.communicate()
+    assert_files_equal(cutpath("small.fasta"), out_path)
+
+
+def test_empty_read_with_wildcard_in_adapter(run):
+    run("-g CWC", "empty.fastq", "empty.fastq")
+
+
+def test_print_progress_to_tty(tmpdir, mocker):
+    mocker.patch("cutadapt.utils.sys.stderr").isatty.return_value = True
+    main(["-o", str(tmpdir.join("out.fastq")), datapath("small.fastq")])
+
+
+def test_adapter_order(run):
+    run("-g ^AAACC -a CCGGG", "adapterorder-ga.fasta", "adapterorder.fasta")
+    run("-a CCGGG -g ^AAACC", "adapterorder-ag.fasta", "adapterorder.fasta")

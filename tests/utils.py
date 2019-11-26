@@ -2,10 +2,6 @@ import os.path
 import subprocess
 import sys
 from contextlib import contextmanager
-from shutil import rmtree
-from tempfile import mkdtemp
-
-from cutadapt.__main__ import main
 
 
 @contextmanager
@@ -15,16 +11,6 @@ def redirect_stderr():
     sys.stderr = sys.stdout
     yield
     sys.stderr = old_stderr
-
-
-@contextmanager
-def temporary_path(name):
-    tempdir = mkdtemp(prefix='cutadapt-tests.')
-    path = os.path.join(tempdir, name)
-    try:
-        yield path
-    finally:
-        rmtree(tempdir)
 
 
 def datapath(path):
@@ -46,15 +32,16 @@ def assert_files_equal(path1, path2):
         raise FilesDifferent('\n' + e.output.decode()) from None
 
 
-def run(params, expected, inpath, inpath2=None):
-    if type(params) is str:
-        params = params.split()
-    with temporary_path(expected) as tmp_fastaq:
-        params += ['-o', tmp_fastaq]  # TODO not parallelizable
-        params += [datapath(inpath)]
-        if inpath2:
-            params += [datapath(inpath2)]
-        assert main(params) is None
-        # TODO redirect standard output
-        assert_files_equal(cutpath(expected), tmp_fastaq)
-    # TODO diff log files
+def binomial(n, k):
+    """
+    Return binomial coefficient ('n choose k').
+    This implementation does not use factorials.
+    """
+    k = min(k, n - k)
+    if k < 0:
+        return 0
+    r = 1
+    for j in range(k):
+        r *= n - j
+        r //= j + 1
+    return r

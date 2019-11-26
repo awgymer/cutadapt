@@ -185,7 +185,7 @@ Paired-end read name check
 
 When reading paired-end files, Cutadapt checks whether the read names match.
 Only the part of the read name before the first space is considered. If the
-read name ends with ``/1`` or ``/2``, then that is also ignored. For example,
+read name ends with ``1`` or ``2``, then that is also ignored. For example,
 two FASTQ headers that would be considered to denote properly paired reads are::
 
     @my_read/1 a comment
@@ -202,9 +202,96 @@ and::
 
     @my_read/2;1
 
-Since the ``/1`` and ``/2`` are ignored only if the occur at the end of the read
+Since the ``1`` and ``2`` are ignored only if the occur at the end of the read
 name, and since the ``;1`` is considered to be part of the read name, these
 reads will not be considered to be propely paired.
+
+
+Rescuing single reads from paired-end reads that were filtered
+--------------------------------------------------------------
+
+When trimming and filtering paired-end reads, Cutadapt always discards entire read pairs. If you
+want to keep one of the reads, you need to write the filtered read pairs to an output file and
+postprocess it.
+
+For example, assume you are using ``-m 30`` to discard too short reads. Cutadapt discards all
+read pairs in which just one of the reads is too short (but see the ``--pair-filter`` option).
+To recover those (individual) reads that are long enough, you can first use the
+``--too-short-(paired)-output`` options to write the filtered pairs to a file, and then postprocess
+those files to keep only the long enough reads.
+
+
+    cutadapt -m 30 -q 20 -o out.1.fastq.gz -p out.2.fastq.gz --too-short-output=tooshort.1.fastq.gz --too-short-paired-output=tooshort.2.fastq.gz in.1.fastq.gz in.2.fastq.gz
+    cutadapt -m 30 -o rescued.a.fastq.gz tooshort.1.fastq.gz
+    cutadapt -m 30 -o rescued.b.fastq.gz tooshort.2.fastq.gz
+
+The two output files ``rescued.a.fastq.gz`` and ``rescued.b.fastq.gz`` contain those individual
+reads that are long enough. Note that the file names do not end in ``.1.fastq.gz`` and
+``.2.fastq.gz`` to make it very clear that these files no longer contain synchronized paired-end
+reads.
+
+
+.. _bisulfite:
+
+Bisulfite sequencing (RRBS)
+---------------------------
+
+When trimming reads that come from a library prepared with the RRBS (reduced
+representation bisulfite sequencing) protocol, the last two 3' bases must be
+removed in addition to the adapter itself. This can be achieved by using not
+the adapter sequence itself, but by adding two wildcard characters to its
+beginning. If the adapter sequence is ``ADAPTER``, the command for trimming
+should be::
+
+    cutadapt -a NNADAPTER -o output.fastq input.fastq
+
+Details can be found in `Babraham bioinformatics' "Brief guide to
+RRBS" <http://www.bioinformatics.babraham.ac.uk/projects/bismark/RRBS_Guide.pdf>`_.
+A summary follows.
+
+During RRBS library preparation, DNA is digested with the restriction enzyme
+MspI, generating a two-base overhang on the 5' end (``CG``). MspI recognizes
+the sequence ``CCGG`` and cuts
+between ``C`` and ``CGG``. A double-stranded DNA fragment is cut in this way::
+
+    5'-NNNC|CGGNNN-3'
+    3'-NNNGGC|CNNN-5'
+
+The fragment between two MspI restriction sites looks like this::
+
+    5'-CGGNNN...NNNC-3'
+      3'-CNNN...NNNGGC-5'
+
+Before sequencing (or PCR) adapters can be ligated, the missing base positions
+must be filled in with GTP and CTP::
+
+    5'-ADAPTER-CGGNNN...NNNCcg-ADAPTER-3'
+    3'-ADAPTER-gcCNNN...NNNGGC-ADAPTER-5'
+
+The filled-in bases, marked in lowercase above, do not contain any original
+methylation information, and must therefore not be used for methylation calling.
+By prefixing the adapter sequence with ``NN``, the bases will be automatically
+stripped during adapter trimming.
+
+
+.. _file-format-conversion:
+
+File format conversion
+----------------------
+
+You can use Cutadapt to convert FASTQ to FASTA format::
+
+    cutadapt -o output.fasta.gz input.fastq.gz
+
+Cutadapt detects that the file name extension of the output file is ``.fasta``
+and writes in FASTA format, omitting the qualities.
+
+When writing to standard output, you need to use the ``--fasta`` option::
+
+    cutadapt --fasta input.fastq.gz > out.fasta
+
+Without the option, Cutadapt writes in FASTQ format.
+
 
 Other things (unfinished)
 -------------------------
@@ -212,4 +299,3 @@ Other things (unfinished)
 * How to detect adapters
 * Use Cutadapt for quality-trimming only
 * Use it for minimum/maximum length filtering
-* Use it for conversion to FASTQ

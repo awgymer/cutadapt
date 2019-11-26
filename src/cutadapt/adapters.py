@@ -4,374 +4,52 @@ Adapter finding and trimming classes
 The ...Adapter classes are responsible for finding adapters.
 The ...Match classes trim the reads.
 """
-import re
+import logging
+from enum import Enum
 from collections import defaultdict
-from cutadapt import align
-from dnaio.readers import FastaReader
+
+from . import align
+
+logger = logging.getLogger()
 
 
-# Constants for the Aligner.locate() function.
-# The function is called with SEQ1 as the adapter, SEQ2 as the read.
-# TODO get rid of those constants, use strings instead
-BACK = align.START_WITHIN_SEQ2 | align.STOP_WITHIN_SEQ2 | align.STOP_WITHIN_SEQ1
-FRONT = align.START_WITHIN_SEQ2 | align.STOP_WITHIN_SEQ2 | align.START_WITHIN_SEQ1
-PREFIX = align.STOP_WITHIN_SEQ2
-SUFFIX = align.START_WITHIN_SEQ2
-# Just like FRONT/BACK, but without internal matches
-FRONT_NOT_INTERNAL = align.START_WITHIN_SEQ1 | align.STOP_WITHIN_SEQ2
-BACK_NOT_INTERNAL = align.START_WITHIN_SEQ2 | align.STOP_WITHIN_SEQ1
-ANYWHERE = align.SEMIGLOBAL
-LINKED = 'linked'
+class Where(Enum):
+    # Constants for the Aligner.locate() function.
+    # The function is called with SEQ1 as the adapter, SEQ2 as the read.
+    # TODO get rid of those constants, use strings instead
+    BACK = align.START_WITHIN_SEQ2 | align.STOP_WITHIN_SEQ2 | align.STOP_WITHIN_SEQ1
+    FRONT = align.START_WITHIN_SEQ2 | align.STOP_WITHIN_SEQ2 | align.START_WITHIN_SEQ1
+    PREFIX = align.STOP_WITHIN_SEQ2
+    SUFFIX = align.START_WITHIN_SEQ2
+    # Just like FRONT/BACK, but without internal matches
+    FRONT_NOT_INTERNAL = align.START_WITHIN_SEQ1 | align.STOP_WITHIN_SEQ2
+    BACK_NOT_INTERNAL = align.START_WITHIN_SEQ2 | align.STOP_WITHIN_SEQ1
+    ANYWHERE = align.SEMIGLOBAL
+    LINKED = 'linked'
+
 
 # TODO put this in some kind of "list of pre-defined adapter types" along with the info above
 WHERE_TO_REMOVE_MAP = {
-    PREFIX: 'prefix',
-    FRONT_NOT_INTERNAL: 'prefix',
-    FRONT: 'prefix',
-    BACK: 'suffix',
-    SUFFIX: 'suffix',
-    BACK_NOT_INTERNAL: 'suffix',
-    ANYWHERE: 'auto',
+    Where.PREFIX: 'prefix',
+    Where.FRONT_NOT_INTERNAL: 'prefix',
+    Where.FRONT: 'prefix',
+    Where.BACK: 'suffix',
+    Where.SUFFIX: 'suffix',
+    Where.BACK_NOT_INTERNAL: 'suffix',
+    Where.ANYWHERE: 'auto',
 }
 
 
-def expand_braces(sequence):
-    """
-    Replace all occurrences of ``x{n}`` (where x is any character) with n
-    occurrences of x. Raise ValueError if the expression cannot be parsed.
-
-    >>> expand_braces('TGA{5}CT')
-    'TGAAAAACT'
-    """
-    # Simple DFA with four states, encoded in prev
-    result = ''
-    prev = None
-    for s in re.split('([{}])', sequence):
-        if s == '':
-            continue
-        if prev is None:
-            if s == '{':
-                raise ValueError('"{" must be used after a character')
-            if s == '}':
-                raise ValueError('"}" cannot be used here')
-            prev = s
-            result += s
-        elif prev == '{':
-            prev = int(s)
-            if not 0 <= prev <= 10000:
-                raise ValueError('Value {} invalid'.format(prev))
-        elif isinstance(prev, int):
-            if s != '}':
-                raise ValueError('"}" expected')
-            result = result[:-1] + result[-1] * prev
-            prev = None
-        else:
-            if s != '{':
-                raise ValueError('Expected "{"')
-            prev = '{'
-    # Check if we are in a non-terminating state
-    if isinstance(prev, int) or prev == '{':
-        raise ValueError("Unterminated expression")
-    return result
-
-
-class AdapterParser:
-    """
-    Factory for Adapter classes that all use the same default parameters (error rate,
-    indels etc.). The given **kwargs will be passed to the Adapter constructors.
-    """
-    def __init__(self, **kwargs):
-        # kwargs: max_error_rate, min_overlap, read_wildcards, adapter_wildcards, indels
-        self.default_parameters = kwargs
-
-    @staticmethod
-    def _extract_name(spec):
-        """
-        Parse an adapter specification given as 'name=adapt' into 'name' and 'adapt'.
-        """
-        fields = spec.split('=', 1)
-        if len(fields) > 1:
-            name, spec = fields
-            name = name.strip()
-        else:
-            name = None
-        spec = spec.strip()
-        return name, spec
-
-    parameters = {
-        # abbreviations
-        'e': 'max_error_rate',
-        'error_rate': 'max_error_rate',
-        'o': 'min_overlap',
-
-        # allowed parameters
-        'max_error_rate': None,
-        'min_overlap': None,
-        'anywhere': None,
-    }
-
-    @staticmethod
-    def _parse_parameters(spec):
-        """Parse key=value;key=value;key=value into a dict"""
-
-        fields = spec.split(';')
-        result = dict()
-        for field in fields:
-            field = field.strip()
-            if not field:
-                continue
-            key, equals, value = field.partition('=')
-            if equals == '=' and value == '':
-                raise ValueError('No value given')
-            key = key.strip()
-            if key not in AdapterParser.parameters:
-                raise KeyError('Unknown parameter {}'.format(key))
-            # unabbreviate
-            while AdapterParser.parameters[key] is not None:
-                key = AdapterParser.parameters[key]
-            value = value.strip()
-            if value == '':
-                value = True
-            else:
-                try:
-                    value = int(value)
-                except ValueError:
-                    value = float(value)
-            if key in result:
-                raise KeyError('Key {} specified twice'.format(key))
-            result[key] = value
-        return result
-
-    @staticmethod
-    def _parse_not_linked(spec, cmdline_type):
-        """
-        Parse an adapter specification for a non-linked adapter (without '...')
-
-        Allow:
-        'back' and ADAPTER
-        'back' and ADAPTERX
-        'back' and ADAPTER$
-        'front' and ADAPTER
-        'front' and XADAPTER
-        'front' and ^ADAPTER
-        'anywhere' and ADAPTER
-        """
-        error = ValueError(
-                "You cannot use multiple placement restrictions for an adapter at the same time. "
-                "Choose one of ^ADAPTER, ADAPTER$, XADAPTER or ADAPTERX")
-        spec, middle, parameters_spec = spec.partition(';')
-        name, spec = AdapterParser._extract_name(spec)
-        spec = spec.strip()
-
-        parameters = AdapterParser._parse_parameters(parameters_spec)
-
-        spec = expand_braces(spec)
-
-        # Special case for adapters consisting of only X characters:
-        # This needs to be supported for backwards-compatibilitity
-        if len(spec.strip('X')) == 0:
-            return name, None, spec, {}
-
-        front_restriction = None
-        if spec.startswith('^'):
-            front_restriction = 'anchored'
-            spec = spec[1:]
-        if spec.upper().startswith('X'):
-            if front_restriction is not None:
-                raise error
-            front_restriction = 'noninternal'
-            spec = spec.lstrip('xX')
-
-        back_restriction = None
-        if spec.endswith('$'):
-            back_restriction = 'anchored'
-            spec = spec[:-1]
-        if spec.upper().endswith('X'):
-            if back_restriction is not None:
-                raise error
-            back_restriction = 'noninternal'
-            spec = spec.rstrip('xX')
-
-        n_placement_restrictions = int(bool(front_restriction)) + int(bool(back_restriction))
-        if n_placement_restrictions > 1:
-            raise error
-
-        if cmdline_type == 'front' and back_restriction:
-            raise ValueError(
-                "Allowed placement restrictions for a 5' adapter are XADAPTER and ^ADAPTER")
-        if cmdline_type == 'back' and front_restriction:
-            raise ValueError(
-                "Allowed placement restrictions for a 3' adapter are ADAPTERX and ADAPTER$")
-
-        assert front_restriction is None or back_restriction is None
-        if front_restriction is not None:
-            restriction = front_restriction
-        else:
-            restriction = back_restriction
-
-        if cmdline_type == 'anywhere' and restriction is not None:
-            raise ValueError(
-                "Placement restrictions (with X, ^, $) not supported for 'anywhere' (-b) adapters")
-
-        return name, restriction, spec, parameters
-
-    @staticmethod
-    def _restriction_to_where(cmdline_type, restriction):
-        if cmdline_type == 'front':
-            if restriction is None:
-                return FRONT
-            elif restriction == 'anchored':
-                return PREFIX
-            elif restriction == 'noninternal':
-                return FRONT_NOT_INTERNAL
-            else:
-                raise ValueError(
-                    'Value {} for a front restriction not allowed'.format(restriction))
-        elif cmdline_type == 'back':
-            if restriction is None:
-                return BACK
-            elif restriction == 'anchored':
-                return SUFFIX
-            elif restriction == 'noninternal':
-                return BACK_NOT_INTERNAL
-            else:
-                raise ValueError(
-                    'Value {} for a back restriction not allowed'.format(restriction))
-        else:
-            assert cmdline_type == 'anywhere'
-            if restriction is None:
-                return ANYWHERE
-            else:
-                raise ValueError('No placement may be specified for "anywhere" adapters')
-
-    def _parse(self, spec, cmdline_type='back', name=None):
-        """
-        Parse an adapter specification not using ``file:`` notation and return
-        an object of an appropriate Adapter class.
-
-        name -- Adapter name if not included as part of the spec. (If spec is
-        'name=ADAPTER', name will be 'name'.)
-
-        cmdline_type -- describes which commandline parameter was used (``-a``
-        is 'back', ``-b`` is 'anywhere', and ``-g`` is 'front').
-        """
-        if cmdline_type not in ('front', 'back', 'anywhere'):
-            raise ValueError('cmdline_type cannot be {!r}'.format(cmdline_type))
-        spec1, middle, spec2 = spec.partition('...')
-        del spec
-
-        # Handle linked adapter
-        if middle == '...' and spec1 and spec2:
-            if cmdline_type == 'anywhere':
-                raise ValueError("'anywhere' (-b) adapters may not be linked")
-            name1, front_restriction, sequence1, parameters1 = self._parse_not_linked(spec1, 'front')
-            name2, back_restriction, sequence2, parameters2 = self._parse_not_linked(spec2, 'back')
-            if not name:
-                name = name1
-
-            # Automatically anchor the 5' adapter if -a is used
-            if cmdline_type == 'back' and front_restriction is None:
-                front_restriction = 'anchored'
-
-            front_anchored = front_restriction is not None
-            back_anchored = back_restriction is not None
-
-            front_parameters = self.default_parameters.copy()
-            front_parameters.update(parameters1)
-            back_parameters = self.default_parameters.copy()
-            back_parameters.update(parameters2)
-
-            if cmdline_type == 'front':
-                # -g requires both adapters to be present
-                front_required = True
-                back_required = True
-            else:
-                # -a requires only the anchored adapters to be present
-                front_required = front_anchored
-                back_required = back_anchored
-
-            front_where = self._restriction_to_where('front', front_restriction)
-            back_where = self._restriction_to_where('back', back_restriction)
-            front_adapter = Adapter(sequence1, where=front_where, name=None, **front_parameters)
-            back_adapter = Adapter(sequence2, where=back_where, name=None, **back_parameters)
-
-            return LinkedAdapter(
-                front_adapter=front_adapter,
-                back_adapter=back_adapter,
-                front_required=front_required,
-                back_required=back_required,
-                name=name,
-            )
-
-        if middle == '...':
-            if not spec1:
-                if cmdline_type == 'back':  # -a ...ADAPTER
-                    spec = spec2
-                else:  # -g ...ADAPTER
-                    raise ValueError('Invalid adapter specification')
-            elif not spec2:
-                if cmdline_type == 'back':  # -a ADAPTER...
-                    cmdline_type = 'front'
-                    spec = '^' + spec1
-                else:  # -g ADAPTER...
-                    spec = spec1
-            else:
-                assert False, 'This should not happen'
-        else:
-            spec = spec1
-
-        # TODO
-        specname, restriction, sequence, parameters = self._parse_not_linked(spec, cmdline_type)
-        del spec
-
-        where = self._restriction_to_where(cmdline_type, restriction)
-
-        if not name:
-            name = specname
-        if parameters.get('anywhere', False):
-            parameters['remove'] = WHERE_TO_REMOVE_MAP[where]
-            where = ANYWHERE
-            del parameters['anywhere']
-        params = self.default_parameters.copy()
-        params.update(parameters)
-        if where in (FRONT, BACK):
-            adapter_class = BackOrFrontAdapter
-        else:
-            adapter_class = Adapter
-        return adapter_class(sequence=sequence, where=where, name=name, **params)
-
-    def parse(self, spec, cmdline_type='back'):
-        """
-        Parse an adapter specification and yield appropriate Adapter classes.
-        This works like the _parse_no_file() function above, but also supports the
-        ``file:`` notation for reading adapters from an external FASTA
-        file. Since a file can contain multiple adapters, this
-        function is a generator.
-        """
-        if spec.startswith('file:'):
-            f_name, sep, pars = spec[5:].partition(';')
-            with FastaReader(f_name) as fasta:
-                for record in fasta:
-                    name = record.name.split(None, 1)
-                    name = name[0] if name else None
-                    seq = record.sequence + sep + pars
-                    yield self._parse(seq, cmdline_type, name=name)
-        else:
-            yield self._parse(spec, cmdline_type, name=None)
-
-    def parse_multi(self, back, anywhere, front):
-        """
-        Parse all three types of commandline options that can be used to
-        specify adapters. back, anywhere and front are lists of strings,
-        corresponding to the respective commandline types (-a, -b, -g).
-
-        Return a list of appropriate Adapter classes.
-        """
-        adapters = []
-        for specs, cmdline_type in (back, 'back'), (anywhere, 'anywhere'), (front, 'front'):
-            for spec in specs:
-                adapters.extend(self.parse(spec, cmdline_type))
-        return adapters
+ADAPTER_TYPE_NAMES = {
+    Where.BACK: "regular 3'",
+    Where.BACK_NOT_INTERNAL: "non-internal 3'",
+    Where.FRONT: "regular 5'",
+    Where.FRONT_NOT_INTERNAL: "non-internal 5'",
+    Where.PREFIX: "anchored 5'",
+    Where.SUFFIX: "anchored 3'",
+    Where.ANYWHERE: "variable 5'/3'",
+    Where.LINKED: "linked",
+}
 
 
 def returns_defaultdict_int():
@@ -388,15 +66,32 @@ class EndStatistics:
         self.where = adapter.where
         self.max_error_rate = adapter.max_error_rate
         self.sequence = adapter.sequence
+        self.effective_length = adapter.effective_length
         self.has_wildcards = adapter.adapter_wildcards
         # self.errors[l][e] == n iff n times a sequence of length l matching at e errors was removed
         self.errors = defaultdict(returns_defaultdict_int)
         self._remove = adapter.remove
         self.adjacent_bases = {'A': 0, 'C': 0, 'G': 0, 'T': 0, '': 0}
 
+    def __repr__(self):
+        errors = {k: dict(v) for k, v in self.errors.items()}
+        return "EndStatistics(where={}, max_error_rate={}, errors={}, adjacent_bases={})".format(
+            self.where,
+            self.max_error_rate,
+            errors,
+            self.adjacent_bases,
+        )
+
     def __iadd__(self, other):
-        if (self.where != other.where or self._remove != other._remove or
-                self.max_error_rate != other.max_error_rate or self.sequence != other.sequence):
+        if not isinstance(other, self.__class__):
+            raise ValueError("Cannot compare")
+        if (
+            self.where != other.where
+            or self._remove != other._remove
+            or self.max_error_rate != other.max_error_rate
+            or self.sequence != other.sequence
+            or self.effective_length != other.effective_length
+        ):
             raise RuntimeError('Incompatible EndStatistics, cannot be added')
         for base in ('A', 'C', 'G', 'T', ''):
             self.adjacent_bases[base] += other.adjacent_bases[base]
@@ -407,11 +102,10 @@ class EndStatistics:
 
     @property
     def lengths(self):
-        # Python 2.6 has no dict comprehension
-        d = dict((length, sum(errors.values())) for length, errors in self.errors.items())
+        d = {length: sum(errors.values()) for length, errors in self.errors.items()}
         return d
 
-    def random_match_probabilities(self, gc_content):
+    def random_match_probabilities(self, gc_content: float):
         """
         Estimate probabilities that this adapter end matches a
         random sequence. Indels are not taken into account.
@@ -455,6 +149,14 @@ class AdapterStatistics:
         else:
             self.back = EndStatistics(adapter2)
 
+    def __repr__(self):
+        return "AdapterStatistics(name={}, where={}, front={}, back={})".format(
+            self.name,
+            self.where,
+            self.front,
+            self.back,
+        )
+
     def __iadd__(self, other):
         if self.where != other.where:  # TODO self.name != other.name or
             raise ValueError('incompatible objects')
@@ -470,6 +172,7 @@ class Match:
     __slots__ = ['astart', 'astop', 'rstart', 'rstop', 'matches', 'errors', 'remove_before',
         'adapter', 'read', 'length', '_trimmed_read', 'adjacent_base']
 
+    # TODO Can remove_before be removed from the constructor parameters?
     def __init__(self, astart, astop, rstart, rstop, matches, errors, remove_before, adapter, read):
         """
         remove_before -- True: remove bases before adapter. False: remove after
@@ -576,8 +279,7 @@ class Adapter:
     This class can find a single adapter characterized by sequence, error rate,
     type etc. within reads.
 
-    where --  One of the BACK, FRONT, PREFIX, SUFFIX or ANYWHERE constants.
-        This influences where the adapter is allowed to appear within the
+    where --  A Where enum value. This influences where the adapter is allowed to appear within the
         read.
 
     remove -- describes which part of the read to remove if the adapter was found:
@@ -612,7 +314,7 @@ class Adapter:
         self.name = _generate_adapter_name() if name is None else name
         self.sequence = sequence.upper().replace('U', 'T')
         if not self.sequence:
-            raise ValueError('Sequence is empty')
+            raise ValueError("Adapter sequence is empty")
         self.where = where
         if remove not in (None, 'prefix', 'suffix', 'auto'):
             raise ValueError('remove parameter must be "prefix", "suffix", "auto" or None')
@@ -629,16 +331,30 @@ class Adapter:
         # Optimization: Use non-wildcard matching if only ACGT is used
         self.adapter_wildcards = adapter_wildcards and not set(self.sequence) <= set('ACGT')
         self.read_wildcards = read_wildcards
-
-        self.aligner = align.Aligner(self.sequence, self.max_error_rate,
-            flags=self.where, wildcard_ref=self.adapter_wildcards, wildcard_query=self.read_wildcards)
-        self.aligner.min_overlap = self.min_overlap
         self.indels = indels
-        if not self.indels:
+        if self.is_anchored and not self.indels:
+            aligner_class = align.PrefixComparer if self.where is Where.PREFIX else align.SuffixComparer
+            self.aligner = aligner_class(
+                self.sequence,
+                self.max_error_rate,
+                wildcard_ref=self.adapter_wildcards,
+                wildcard_query=self.read_wildcards,
+                min_overlap=self.min_overlap
+            )
+        else:
             # TODO
-            # When indels are disallowed, an entirely different algorithm
-            # should be used.
-            self.aligner.indel_cost = 100000
+            # Indels are suppressed by setting their cost very high, but a different algorithm
+            # should be used instead.
+            indel_cost = 1 if self.indels else 100000
+            self.aligner = align.Aligner(
+                self.sequence,
+                self.max_error_rate,
+                flags=self.where.value,
+                wildcard_ref=self.adapter_wildcards,
+                wildcard_query=self.read_wildcards,
+                indel_cost=indel_cost,
+                min_overlap=self.min_overlap,
+            )
 
     def __repr__(self):
         return '<Adapter(name={name!r}, sequence={sequence!r}, where={where}, '\
@@ -646,6 +362,15 @@ class Adapter:
             'read_wildcards={read_wildcards}, '\
             'adapter_wildcards={adapter_wildcards}, '\
             'indels={indels})>'.format(**vars(self))
+
+    @property
+    def is_anchored(self):
+        """Return whether this adapter is anchored"""
+        return self.where in {Where.PREFIX, Where.SUFFIX}
+
+    @property
+    def effective_length(self):
+        return self.aligner.effective_length
 
     def enable_debug(self):
         """
@@ -663,16 +388,16 @@ class Adapter:
         return None if no match was found given the matching criteria (minimum
         overlap length, maximum error rate).
         """
-        read_seq = read.sequence.upper()  # temporary copy
+        read_seq = read.sequence
         pos = -1
 
         # try to find an exact match first unless wildcards are allowed
         if not self.adapter_wildcards:
-            if self.where == PREFIX:
+            if self.where is Where.PREFIX:
                 pos = 0 if read_seq.startswith(self.sequence) else -1
-            elif self.where == SUFFIX:
+            elif self.where is Where.SUFFIX:
                 pos = (len(read_seq) - len(self.sequence)) if read_seq.endswith(self.sequence) else -1
-            elif self.where == BACK or self.where == FRONT:
+            elif self.where is Where.BACK or self.where is Where.FRONT:
                 pos = read_seq.find(self.sequence)
             # TODO BACK_NOT_INTERNAL, FRONT_NOT_INTERNAL
         if pos >= 0:
@@ -681,27 +406,17 @@ class Adapter:
                 len(self.sequence), 0)
         else:
             # try approximate matching
-            if not self.indels and self.where in (PREFIX, SUFFIX):
-                if self.where == PREFIX:
-                    alignment = align.compare_prefixes(self.sequence, read_seq,
-                        wildcard_ref=self.adapter_wildcards, wildcard_query=self.read_wildcards)
-                else:
-                    alignment = align.compare_suffixes(self.sequence, read_seq,
-                        wildcard_ref=self.adapter_wildcards, wildcard_query=self.read_wildcards)
-                astart, astop, rstart, rstop, matches, errors = alignment
-                if astop - astart >= self.min_overlap and errors / (astop - astart) <= self.max_error_rate:
-                    match_args = alignment
-                else:
-                    match_args = None
-            else:
-                alignment = self.aligner.locate(read_seq)
-                if self._debug:
+            alignment = self.aligner.locate(read_seq)
+            if self._debug:
+                try:
                     print(self.aligner.dpmatrix)  # pragma: no cover
-                if alignment is None:
-                    match_args = None
-                else:
-                    astart, astop, rstart, rstop, matches, errors = alignment
-                    match_args = (astart, astop, rstart, rstop, matches, errors)
+                except AttributeError:
+                    pass
+            if alignment is None:
+                match_args = None
+            else:
+                astart, astop, rstart, rstop, matches, errors = alignment
+                match_args = (astart, astop, rstart, rstop, matches, errors)
 
         if match_args is None:
             return None
@@ -734,7 +449,7 @@ class BackOrFrontAdapter(Adapter):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        assert self.where == BACK or self.where == FRONT
+        assert self.where is Where.BACK or self.where is Where.FRONT
         self._remove_before = self.remove == 'prefix'
 
     def match_to(self, read):
@@ -785,10 +500,21 @@ class LinkedMatch:
     @property
     def matches(self):
         """Number of matching bases"""
-        m = getattr(self.front_match, 'matches', 0)
+        m = 0
+        if self.front_match is not None:
+            m += self.front_match.matches
         if self.back_match is not None:
             m += self.back_match.matches
         return m
+
+    @property
+    def errors(self):
+        e = 0
+        if self.front_match is not None:
+            e += self.front_match.errors
+        if self.back_match is not None:
+            e += self.back_match.errors
+        return e
 
     def trimmed(self):
         if self.back_match:
@@ -822,18 +548,14 @@ class LinkedAdapter:
         back_required,
         name,
     ):
-        """
-        require_both -- require both adapters to match. If not specified, the default is to
-            require only anchored adapters to match.
-        kwargs are passed on to individual Adapter constructors
-        """
-        self._require_front_match = front_required
-        self._require_back_match = back_required
+        self.front_required = front_required
+        self.back_required = back_required
 
         # The following attributes are needed for the report
-        self.where = LINKED
+        self.where = Where.LINKED
         self.name = _generate_adapter_name() if name is None else name
         self.front_adapter = front_adapter
+        self.front_adapter.name = self.name
         self.back_adapter = back_adapter
 
     def enable_debug(self):
@@ -847,16 +569,179 @@ class LinkedAdapter:
         both need to match.
         """
         front_match = self.front_adapter.match_to(read)
-        if self._require_front_match and front_match is None:
+        if self.front_required and front_match is None:
             return None
 
         if front_match is not None:
             # TODO statistics
             read = front_match.trimmed()
         back_match = self.back_adapter.match_to(read)
-        if back_match is None and (self._require_back_match or front_match is None):
+        if back_match is None and (self.back_required or front_match is None):
             return None
         return LinkedMatch(front_match, back_match, self)
 
     def create_statistics(self):
-        return AdapterStatistics(self.front_adapter, self.back_adapter, where=LINKED)
+        return AdapterStatistics(self.front_adapter, self.back_adapter, where=Where.LINKED)
+
+    @property
+    def sequence(self):
+        return self.front_adapter.sequence + "..." + self.back_adapter.sequence
+
+    @property
+    def remove(self):
+        return None
+
+
+class MultiAdapter:
+    """
+    Represent multiple adapters of the same type at once and use an index data structure
+    to speed up matching. This acts like a "normal" Adapter as it provides a match_to
+    method, but is faster with lots of adapters.
+
+    There are quite a few restrictions:
+    - the adapters need to be either all PREFIX or all SUFFIX adapters
+    - no indels are allowed
+    - the error rate allows at most 2 mismatches
+    - wildcards in the adapter are not allowed
+    - wildcards in the read are not allowed
+
+    Use the is_acceptable() method to check individual adapters.
+    """
+
+    def __init__(self, adapters):
+        """All given adapters must be of the same type, either Where.PREFIX or Where.SUFFIX"""
+        if not adapters:
+            raise ValueError("Adapter list is empty")
+        self._where = adapters[0].where
+        for adapter in adapters:
+            self._accept(adapter)
+            if adapter.where is not self._where:
+                raise ValueError("All adapters must have identical 'where' attributes")
+        self._adapters = adapters
+        self._longest, self._index = self._make_index()
+
+    def __repr__(self):
+        return 'MultiAdapter(adapters={!r}, where={})'.format(self._adapters, self._where)
+
+    @staticmethod
+    def _accept(adapter):
+        """Raise a ValueError if the adapter is not acceptable"""
+        if adapter.where is not Where.PREFIX and adapter.where is not Where.SUFFIX:
+            raise ValueError("Only anchored adapter types are allowed")
+        if adapter.read_wildcards:
+            raise ValueError("Wildcards in the read not supported")
+        if adapter.adapter_wildcards:
+            raise ValueError("Wildcards in the adapter not supported")
+        if adapter.indels:
+            raise ValueError("Indels not allowed")
+        k = int(len(adapter) * adapter.max_error_rate)
+        if k > 2:
+            raise ValueError("Error rate too high")
+
+    @staticmethod
+    def is_acceptable(adapter):
+        """
+        Return whether this adapter is acceptable for being used by MultiAdapter
+
+        Adapters are not acceptable if they allow wildcards, allow too many errors,
+        or would lead to a very large index.
+        """
+        try:
+            MultiAdapter._accept(adapter)
+        except ValueError:
+            return False
+        return True
+
+    def _make_index(self):
+        logger.info('Building index of %s adapters ...', len(self._adapters))
+        index = dict()
+        longest = 0
+        has_warned = False
+        for adapter in self._adapters:
+            sequence = adapter.sequence
+            k = int(adapter.max_error_rate * len(sequence))
+            for s, errors, matches in align.hamming_environment(sequence, k):
+                if s in index:
+                    other_adapter, other_errors, other_matches = index[s]
+                    if matches < other_matches:
+                        continue
+                    if other_matches == matches and not has_warned:
+                        logger.warning(
+                            "Adapters %s %r and %s %r are very similar. At %s allowed errors, "
+                            "the sequence %r cannot be assigned uniquely because the number of "
+                            "matches is %s compared to both adapters.",
+                            other_adapter.name, other_adapter.sequence, adapter.name,
+                            adapter.sequence, k, s, matches
+                        )
+                        has_warned = True
+                else:
+                    index[s] = (adapter, errors, matches)
+                longest = max(longest, len(s))
+        logger.info('Built an index containing %s strings.', len(index))
+
+        return longest, index
+
+    def match_to(self, read):
+        """
+        Match the adapters against the read and return a Match that represents
+        the best match or None if no match was found
+        """
+        if self._where is Where.PREFIX:
+            def make_affix(n):
+                return read.sequence[:n]
+        else:
+            def make_affix(n):
+                return read.sequence[-n:]
+
+        # Check all the prefixes of the read that could match
+        best_adapter = None
+        best_length = 0
+        best_m = -1
+        best_e = 1000
+        # TODO do not go through all the lengths, only those that actually exist in the index
+        for length in range(self._longest, -1, -1):
+            if length < best_m:
+                # No chance of getting the same or a higher number of matches, so we can stop early
+                break
+
+            affix = make_affix(length)
+            try:
+                adapter, e, m = self._index[affix]
+            except KeyError:
+                continue
+            if m > best_m or (m == best_m and e < best_e):
+                best_adapter = adapter
+                best_e = e
+                best_m = m
+                best_length = length
+
+        if best_m == -1:
+            return None
+        else:
+            if self._where is Where.PREFIX:
+                rstart, rstop = 0, best_length
+            else:
+                assert self._where is Where.SUFFIX
+                rstart, rstop = len(read) - best_length, len(read)
+            return Match(
+                astart=0,
+                astop=len(best_adapter.sequence),
+                rstart=rstart,
+                rstop=rstop,
+                matches=best_m,
+                errors=best_e,
+                remove_before=best_adapter.remove == 'prefix',
+                adapter=best_adapter,
+                read=read
+            )
+
+
+def warn_duplicate_adapters(adapters):
+    d = dict()
+    for adapter in adapters:
+        key = (adapter.sequence, adapter.where, adapter.remove)
+        if key in d:
+            logger.warning("Adapter %r (%s) was specified multiple times! "
+                "Please make sure that this is what you want.",
+                adapter.sequence, ADAPTER_TYPE_NAMES[adapter.where])
+        d[key] = adapter.name

@@ -1,10 +1,12 @@
 __all__ = [
     'Aligner',
-    'compare_prefixes',
-    'compare_suffixes',
+    'PrefixComparer',
+    'SuffixComparer',
+    'hamming_sphere',
+    'hamming_environment',
 ]
 
-from cutadapt._align import Aligner, compare_prefixes
+from cutadapt._align import Aligner, PrefixComparer, SuffixComparer
 
 # flags for global alignment
 
@@ -24,20 +26,40 @@ STOP_WITHIN_SEQ2 = 8
 SEMIGLOBAL = START_WITHIN_SEQ1 | START_WITHIN_SEQ2 | STOP_WITHIN_SEQ1 | STOP_WITHIN_SEQ2
 
 
-def compare_suffixes(s1, s2, wildcard_ref=False, wildcard_query=False):
+def hamming_sphere(s, k):
     """
-    Find out whether one string is the suffix of the other one, allowing
-    mismatches. Used to find an anchored 3' adapter when no indels are allowed.
+    Yield all strings t for which the hamming distance between s and t is exactly k,
+    assuming the alphabet is A, C, G, T.
     """
-    s1 = s1[::-1]
-    s2 = s2[::-1]
-    _, length, _, _, matches, errors = compare_prefixes(s1, s2, wildcard_ref, wildcard_query)
-    return (len(s1) - length, len(s1), len(s2) - length, len(s2), matches, errors)
+    assert k >= 0
+    if k == 0:
+        yield s
+        return
+    n = len(s)
+
+    # i is the first position that is varied
+    for i in range(n - k + 1):
+        prefix = s[:i]
+        c = s[i]
+        suffix = s[i+1:]
+        for ch in 'ACGT':
+            if ch == c:
+                continue
+            for t in hamming_sphere(suffix, k - 1):
+                y = prefix + ch + t
+                assert len(y) == n
+                yield y
 
 
-# convenience function (to avoid having to instantiate an Aligner manually)
-def locate(reference, query, max_error_rate, flags=SEMIGLOBAL, wildcard_ref=False,
-        wildcard_query=False, min_overlap=1):
-    aligner = Aligner(reference, max_error_rate, flags, wildcard_ref, wildcard_query)
-    aligner.min_overlap = min_overlap
-    return aligner.locate(query)
+def hamming_environment(s, k):
+    """
+    Find all strings t for which the hamming distance between s and t is at most k,
+    assuming the alphabet is A, C, G, T.
+
+    Yield tuples (t, e, m), where e is the hamming distance between s and t and
+    m is the number of matches (equal to len(t) - e).
+    """
+    n = len(s)
+    for e in range(k + 1):
+        for t in hamming_sphere(s, e):
+            yield t, e, n - e

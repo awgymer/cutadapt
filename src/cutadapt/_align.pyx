@@ -1,7 +1,6 @@
 # cython: profile=False, emit_code_comments=False, language_level=3
 from cpython.mem cimport PyMem_Malloc, PyMem_Free, PyMem_Realloc
 
-
 # structure for a DP matrix entry
 ctypedef struct _Entry:
     int cost
@@ -200,8 +199,10 @@ cdef class Aligner:
         bint wildcard_query
         bint debug
         object _dpmatrix
-        bytes _reference  # TODO rename to translated_reference or so
-        str str_reference
+        str reference  # reference as set by the user (as str)
+        bytes _reference  # internal, bytes version of reference (possibly translated to a non-ASCII representation)
+        readonly int effective_length
+        int* n_counts  # n_counts[i] == number of N characters in reference[:i]
 
     def __cinit__(
         self,
@@ -210,6 +211,8 @@ cdef class Aligner:
         int flags=15,
         bint wildcard_ref=False,
         bint wildcard_query=False,
+        int indel_cost=1,
+        int min_overlap=1,
     ):
         self.max_error_rate = max_error_rate
         self.start_in_reference = flags & 1
@@ -218,50 +221,44 @@ cdef class Aligner:
         self.stop_in_query = flags & 8
         self.wildcard_ref = wildcard_ref
         self.wildcard_query = wildcard_query
-        self.str_reference = reference
-        self.reference = reference
-        self._min_overlap = 1
+        self._set_reference(reference)
+        if min_overlap < 1:
+            raise ValueError('min_overlap must be at least 1')
+        self._min_overlap = min_overlap
         self.debug = False
         self._dpmatrix = None
-        self._insertion_cost = 1
-        self._deletion_cost = 1
+        if indel_cost < 1:
+            raise ValueError('indel_cost must be at least 1')
+        self._insertion_cost = indel_cost
+        self._deletion_cost = indel_cost
 
-    property min_overlap:
-        def __get__(self):
-            return self._min_overlap
-
-        def __set__(self, int value):
-            if value < 1:
-                raise ValueError('Minimum overlap must be at least 1')
-            self._min_overlap = value
-
-    property indel_cost:
-        """
-        Matches cost 0, mismatches cost 1. Only insertion/deletion costs can be
-        changed.
-        """
-        def __set__(self, value):
-            if value < 1:
-                raise ValueError('Insertion/deletion cost must be at least 1')
-            self._insertion_cost = value
-            self._deletion_cost = value
-
-    property reference:
-        def __get__(self):
-            return self._reference
-
-        def __set__(self, str reference):
-            mem = <_Entry*> PyMem_Realloc(self.column, (len(reference) + 1) * sizeof(_Entry))
-            if not mem:
-                raise MemoryError()
-            self.column = mem
-            self._reference = reference.encode('ascii')
-            self.m = len(reference)
-            if self.wildcard_ref:
-                self._reference = self._reference.translate(IUPAC_TABLE)
-            elif self.wildcard_query:
-                self._reference = self._reference.translate(ACGT_TABLE)
-            self.str_reference = reference
+    def _set_reference(self, str reference):
+        mem = <_Entry*> PyMem_Realloc(self.column, (len(reference) + 1) * sizeof(_Entry))
+        if not mem:
+            raise MemoryError()
+        mem_nc = <int*> PyMem_Realloc(self.n_counts, (len(reference) + 1) * sizeof(int))
+        if not mem_nc:
+            raise MemoryError()
+        self.column = mem
+        self.n_counts = mem_nc
+        self._reference = reference.encode('ascii')
+        self.m = len(reference)
+        self.effective_length = self.m
+        n_count = 0
+        for i in range(self.m):
+            self.n_counts[i] = n_count
+            if reference[i] == 'n' or reference[i] == 'N':
+                n_count += 1
+        self.n_counts[self.m] = n_count
+        assert self.n_counts[self.m] == reference.count('N') + reference.count('n')
+        if self.wildcard_ref:
+            self.effective_length = self.m - self.n_counts[self.m]
+            if self.effective_length == 0:
+                raise ValueError("Cannot have only N wildcards in the sequence")
+            self._reference = self._reference.translate(IUPAC_TABLE)
+        elif self.wildcard_query:
+            self._reference = self._reference.translate(ACGT_TABLE)
+        self.reference = reference
 
     property dpmatrix:
         """
@@ -295,7 +292,7 @@ cdef class Aligner:
         cdef:
             char* s1 = self._reference
             bytes query_bytes = query.encode('ascii')
-            char* s2 = query_bytes
+            char* s2
             int m = self.m
             int n = len(query)
             _Entry* column = self.column  # Current column of the DP matrix
@@ -305,12 +302,14 @@ cdef class Aligner:
 
         if self.wildcard_query:
             query_bytes = query_bytes.translate(IUPAC_TABLE)
-            s2 = query_bytes
         elif self.wildcard_ref:
             query_bytes = query_bytes.translate(ACGT_TABLE)
-            s2 = query_bytes
         else:
+            # TODO Adding the .upper() increases overall runtime slightly even
+            # when I remove the .upper() from Adapter.match_to().
+            query_bytes = query_bytes.upper()
             compare_ascii = True
+        s2 = query_bytes
         """
         DP Matrix:
                    query (j)
@@ -367,7 +366,7 @@ cdef class Aligner:
                 column[i].origin = min_n - i
 
         if self.debug:
-            self._dpmatrix = DPMatrix(self.str_reference, query)
+            self._dpmatrix = DPMatrix(self.reference, query)
             for i in range(m + 1):
                 self._dpmatrix.set_entry(i, min_n, column[i].cost)
         cdef _Match best
@@ -388,6 +387,8 @@ cdef class Aligner:
             int cost_insertion
             int origin, cost, matches
             int length
+            int ref_start
+            int cur_effective_length
             bint characters_equal
             # We keep only a single column of the DP matrix in memory.
             # To access the diagonal cell to the upper left,
@@ -458,9 +459,17 @@ cdef class Aligner:
                     # Found a match. If requested, find best match in last row.
                     # length of the aligned part of the reference
                     length = m + min(column[m].origin, 0)
+                    cur_effective_length = length
+                    if self.wildcard_ref:
+                        if length < m:
+                            # Recompute effective length so that it only takes into
+                            # account the matching suffix of the reference
+                            cur_effective_length = length - self.n_counts[length]
+                        else:
+                            cur_effective_length = self.effective_length
                     cost = column[m].cost
                     matches = column[m].matches
-                    if length >= self._min_overlap and cost <= length * max_error_rate and (matches > best.matches or (matches == best.matches and cost < best.cost)):
+                    if length >= self._min_overlap and cost <= cur_effective_length * max_error_rate and (matches > best.matches or (matches == best.matches and cost < best.cost)):
                         # update
                         best.matches = matches
                         best.cost = cost
@@ -479,7 +488,21 @@ cdef class Aligner:
                 length = i + min(column[i].origin, 0)
                 cost = column[i].cost
                 matches = column[i].matches
-                if length >= self._min_overlap and cost <= length * max_error_rate and (matches > best.matches or (matches == best.matches and cost < best.cost)):
+                if self.wildcard_ref:
+                    if length < m:
+                        # Recompute effective length so that it only takes into
+                        # account the matching part of the reference
+                        ref_start = -min(column[i].origin, 0)
+                        assert 0 <= ref_start <= m
+                        cur_effective_length = length - (self.n_counts[i] - self.n_counts[ref_start])
+                    else:
+                        cur_effective_length = self.effective_length
+                else:
+                    cur_effective_length = length
+                assert 0 <= cur_effective_length and cur_effective_length <= length
+                assert cur_effective_length <= self.effective_length
+
+                if length >= self._min_overlap and cost <= cur_effective_length * max_error_rate and (matches > best.matches or (matches == best.matches and cost < best.cost)):
                     # update best
                     best.matches = matches
                     best.cost = cost
@@ -505,50 +528,125 @@ cdef class Aligner:
 
     def __dealloc__(self):
         PyMem_Free(self.column)
+        PyMem_Free(self.n_counts)
 
 
-def compare_prefixes(str ref, str query, bint wildcard_ref=False, bint wildcard_query=False):
+cdef class PrefixComparer:
     """
-    Find out whether one string is the prefix of the other one, allowing
-    IUPAC wildcards in ref and/or query if the appropriate flag is set.
+    A version of the Aligner that is specialized in the following way:
 
-    This is used to find an anchored 5' adapter (type 'FRONT') in the 'no indels' mode.
-    This is very simple as only the number of errors needs to be counted.
+    - it does not allow indels
+    - it allows only 5' anchored adapters
 
-    This function returns a tuple compatible with what Aligner.locate outputs.
+    This is a separate class, not simply a function, in order to be able
+    to cache the reference (avoiding to convert it from str to bytes on
+    every invocation)
     """
     cdef:
-        int m = len(ref)
-        int n = len(query)
-        bytes query_bytes = query.encode('ascii')
-        bytes ref_bytes = ref.encode('ascii')
-        char* r_ptr
-        char* q_ptr
-        int length = min(m, n)
-        int i, matches = 0
-        bint compare_ascii = False
+        bytes reference
+        bint wildcard_ref
+        bint wildcard_query
+        int m
+        int max_k  # max. number of errors
+        readonly int effective_length
+        int min_overlap
 
-    if wildcard_ref:
-        ref_bytes = ref_bytes.translate(IUPAC_TABLE)
-    elif wildcard_query:
-        ref_bytes = ref_bytes.translate(ACGT_TABLE)
-    else:
-        compare_ascii = True
-    if wildcard_query:
-        query_bytes = query_bytes.translate(IUPAC_TABLE)
-    elif wildcard_ref:
-        query_bytes = query_bytes.translate(ACGT_TABLE)
+    # __init__ instead of __cinit__ because we need to override this in SuffixComparer
+    def __init__(
+        self,
+        str reference,
+        double max_error_rate,
+        bint wildcard_ref=False,
+        bint wildcard_query=False,
+        int min_overlap=1,
+    ):
+        self.wildcard_ref = wildcard_ref
+        self.wildcard_query = wildcard_query
+        self.m = len(reference)
+        self.effective_length = self.m
+        if self.wildcard_ref:
+            self.effective_length -= reference.count('N') - reference.count('n')
+            if self.effective_length == 0:
+                raise ValueError("Cannot have only N wildcards in the sequence")
+        if not (0 <= max_error_rate <= 1.):
+            raise ValueError("max_error_rate must be between 0 and 1")
+        self.max_k = int(max_error_rate * self.effective_length)
+        self.reference = reference.encode('ascii').upper()
+        if min_overlap < 1:
+            raise ValueError("min_overlap must be at least 1")
+        self.min_overlap = min_overlap
+        if self.wildcard_ref:
+            self.reference = self.reference.translate(IUPAC_TABLE)
+        elif self.wildcard_query:
+            self.reference = self.reference.translate(ACGT_TABLE)
 
-    if compare_ascii:
-        for i in range(length):
-            if ref[i] == query[i]:
-                matches += 1
-    else:
-        r_ptr = ref_bytes
+    def __repr__(self):
+        return "{}(reference={!r}, max_k={}, wildcard_ref={}, "\
+            "wildcard_query={})".format(
+                self.__class__.__name__,
+                self.reference, self.max_k, self.wildcard_ref,
+                self.wildcard_query)
+
+    def locate(self, str query):
+        """
+        Find out whether one string is the prefix of the other one, allowing
+        IUPAC wildcards in ref and/or query if the appropriate flag is set.
+
+        This is used to find an anchored 5' adapter (type 'FRONT') in the 'no indels' mode.
+        This is very simple as only the number of errors needs to be counted.
+
+        This function returns a tuple compatible with what Aligner.locate outputs.
+        """
+        cdef:
+            bytes query_bytes = query.encode('ascii')
+            char* r_ptr = self.reference
+            char* q_ptr
+            int i, matches = 0
+            int n = len(query_bytes)
+            int length = min(self.m, n)
+            bint compare_ascii = False
+            int errors
+
+        if self.wildcard_query:
+            query_bytes = query_bytes.translate(IUPAC_TABLE)
+        elif self.wildcard_ref:
+            query_bytes = query_bytes.translate(ACGT_TABLE)
+        else:
+            query_bytes = query_bytes.upper()
+            compare_ascii = True
         q_ptr = query_bytes
-        for i in range(length):
-            if (r_ptr[i] & q_ptr[i]) != 0:
-                matches += 1
 
-    # length - matches = no. of errors
-    return (0, length, 0, length, matches, length - matches)
+        if compare_ascii:
+            for i in range(length):
+                if r_ptr[i] == q_ptr[i]:
+                    matches += 1
+        else:
+            for i in range(length):
+                if (r_ptr[i] & q_ptr[i]) != 0:
+                    matches += 1
+
+        errors = length - matches
+        if errors > self.max_k or length < self.min_overlap:
+            return None
+        return (0, length, 0, length, matches, length - matches)
+
+
+cdef class SuffixComparer(PrefixComparer):
+
+    def __init__(
+        self,
+        str reference,
+        double max_error_rate,
+        bint wildcard_ref=False,
+        bint wildcard_query=False,
+        int min_overlap=1,
+    ):
+        super().__init__(reference[::-1], max_error_rate, wildcard_ref, wildcard_query, min_overlap)
+
+    def locate(self, str query):
+        cdef int n = len(query)
+        result = super().locate(query[::-1])
+        if result is None:
+            return None
+        _, length, _, _, matches, errors = result
+        return (self.m - length, self.m, n - length, n, matches, errors)

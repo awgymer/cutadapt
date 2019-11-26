@@ -35,7 +35,25 @@ Then install Cutadapt like this::
 
     conda install -c bioconda cutadapt
 
-If neither `pip` nor `conda` installation works, keep reading.
+If neither ``pip`` nor ``conda`` installation works, keep reading.
+
+
+Installation on a Debian-based Linux distribution
+-------------------------------------------------
+
+Cutadapt is also included in Debian-based Linux distributions, such as Ubuntu.
+Simply use your favorite package manager to install Cutadapt. On the
+command-line, this should work ::
+
+    sudo apt install cutadapt
+
+or possibly ::
+
+    sudo apt install python3-cutadapt
+
+Please be aware that this will likely give you an old version of Cutadapt. If
+you encounter unexpected behavior, please use one of the other installation
+methods to get an up-to-date version before reporting bugs.
 
 
 .. _dependencies:
@@ -150,13 +168,13 @@ environment and what you want to call it. Let us assume you chose the path
 ``~/cutadapt-venv``. Then use these commands for the installation::
 
     python3 -m venv ~/cutadapt-venv
-    ~/cutadapt-venv/bin/pip install Cython
-    ~/cutadapt-venv/bin/pip install https://github.com/marcelm/cutadapt/archive/master.zip
+    ~/cutadapt-venv/bin/python3 -m pip install --upgrade pip
+    ~/cutadapt-venv/bin/pip install git+https://github.com/marcelm/cutadapt.git#egg=cutadapt
 
 To run Cutadapt and see the version number, type ::
 
     ~/cutadapt-venv/bin/cutadapt --version
 
-The reported version number will be something like ``1.14+65.g5610275``. This
-means that you are now running a Cutadapt version that contains 65 additional
-changes (*commits*) since version 1.14.
+The reported version number will be something like ``2.2.dev5+gf564208``. This
+means that you are now running the version of Cutadapt that will become 2.2, and that it contains
+5 changes (*commits*) since the previous release (2.1 in this case).

@@ -2,25 +2,160 @@
 Changes
 =======
 
-development version
--------------------
+v2.7 (2019-11-22)
+-----------------
 
-* This release of Cutadapt requires at least Python 3.4 to run.
+* :issue:`427`: Multicore is now supported even when using ``--info-file``,
+  ``--rest-file`` or ``--wildcard-file``. The only remaining feature that
+  still does not work with multicore is now demultiplexing.
+* :issue:`290`: When running on a single core, Cutadapt no longer spawns
+  external ``pigz`` processes for writing gzip-compressed files. This is a first
+  step towards ensuring that using ``--cores=n`` uses only at most *n* CPU
+  cores.
+* This release adds support for Python 3.8.
+
+v2.6 (2019-10-26)
+-----------------
+
+* :issue:`395`: Do not show animated progress when ``--quiet`` is used.
+* :issue:`399`: When two adapters align to a read equally well (in terms
+  of the number of matches), prefer the alignment that has fewer errors.
+* :issue:`401` Give priority to adapters given earlier on the command
+  line. Previously, the priority was: All 3' adapters, all 5' adapters,
+  all anywhere adapters. In rare cases this could lead to different results.
+* :issue:`404`: Fix an issue preventing Cutadapt from being used on Windows.
+* This release no longer supports Python 3.4 (which has reached end of life).
+
+
+v2.5 (2019-09-04)
+-----------------
+
+* :issue:`391`: Multicore is now supported even when using
+  ``--untrimmed-output``, ``--too-short-output``, ``--too-long-output``
+  or the corresponding ``...-paired-output`` options.
+* :issue:`393`: Using ``--info-file`` no longer crashes when processing
+  paired-end data. However, the info file itself will only contain results
+  for R1.
+* :issue:`394`: Options ``-e``/``--no-indels``/``-O`` were ignored for
+  linked adapters
+* :issue:`320`: When a “Too many open files” error occurs during
+  demultiplexing, Cutadapt can now automatically raise the limit and
+  re-try if the limit is a “soft” limit.
+
+
+v2.4 (2019-07-09)
+-----------------
+
+* :issue:`292`: Implement support for demultiplexing paired-end reads that use
+  :ref:`combinatorial indexing (“combinatorial demultiplexing”)
+  <combinatorial-demultiplexing>`.
+* :pr:`384`: Speed up reading compressed files by requiring an xopen version
+  that uses an external pigz process even for *reading* compressed input files
+  (not only for writing).
+* :issue:`381`: Fix ``--report=minimal`` not working.
+* :issue:`380`: Add a ``--fasta`` option for forcing that FASTA is written
+  to standard output even when input is FASTQ. Previously, forcing
+  FASTA was only possible by providing an output file name.
+
+
+v2.3 (2019-04-25)
+-----------------
+
+* :issue:`378`: The ``--pair-adapters`` option, added in version 2.1, was
+  not actually usable for demultiplexing.
+
+
+v2.2 (2019-04-20)
+---------------------
+
+* :issue:`376`: Fix a crash when using anchored 5' adapters together with
+  ``--no-indels`` and trying to trim an empty read.
+* :issue:`369`: Fix a crash when attempting to trim an empty read using a ``-g``
+  adapter with wildcards.
+
+v2.1 (2019-03-15)
+-----------------
+
+* :issue:`366`: Fix problems when combining ``--cores`` with
+  reading from standard input or writing to standard output.
+* :issue:`347`: Support :ref:`“paired adapters” <paired-adapters>`. One use case is
+  demultiplexing Illumina *Unique Dual Indices* (UDI).
+
+v2.0 (2019-03-06)
+-----------------
+
+This is a major new release with lots of bug fixes and new features, but
+also some backwards-incompatible changes. These should hopefully
+not affect too many users, but please make sure to review them and
+possibly update your scripts!
+
+Backwards-incompatible changes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* :issue:`329`: Linked adapters specified with ``-a ADAPTER1...ADAPTER2``
+  are no longer anchored by default. To get results consist with the old
+  behavior, use ``-a ^ADAPTER1...ADAPTER2`` instead.
 * Support for colorspace data was removed. Thus, the following command-line
   options can no longer be used: ``-c``, ``-d``, ``-t``, ``--strip-f3``,
-  ``--maq``, ``--bwa``, ``--no-zero-cap``
+  ``--maq``, ``--bwa``, ``--no-zero-cap``.
+* “Legacy mode” has been removed. This mode was enabled under certain
+  conditions and would change the behavior such that the read-modifying options
+  such as ``-q`` would only apply to the forward/R1 reads. This was necessary
+  for compatibility with old Cutadapt versions, but became increasingly
+  confusing.
+* :issue:`360`: Computation of the error rate of an adapter match no longer
+  counts the ``N`` wildcard bases. Previously, an adapter like ``N{18}CC``
+  (18 ``N`` wildcards followed by ``CC``) would effectively match
+  anywhere because the default error rate of 0.1 (10%) would allow for
+  two errors. The error rate of a match is now computed as
+  the number of non-``N`` bases in the matching part of the adapter
+  divided by the number of errors.
+* This release of Cutadapt requires at least Python 3.4 to run. Python 2.7
+  is no longer supported.
+
+Features
+~~~~~~~~
+
+* A progress indicator is printed while Cutadapt is working. If you redirect
+  standard error to a file, the indicator is disabled.
 * Reading of FASTQ files has gotten faster due to a new parser. The FASTA
   and FASTQ reading/writing functions are now available as part of the
   `dnaio library <https://github.com/marcelm/dnaio/>`_. This is a separate
   Python package that can be installed independently from Cutadapt.
   There is one regression at the moment: FASTQ files that use a second
   header (after the "+") will have that header removed in the output.
+* Some other performance optimizations were made. Speedups of up to 15%
+  are possible.
+* Demultiplexing has become a lot faster :ref:`under certain conditions <speed-up-demultiplexing>`.
+* :issue:`335`: For linked adapters, it is now possible to
+  :ref:`specify which of the two adapters should be required <linked-override>`,
+  overriding the default.
+* :issue:`166`: By specifying ``--action=lowercase``, it is now possible
+  to not trim adapters, but to instead convert the section of the read
+  that would have been trimmed to lowercase.
+
+Bug fixes
+~~~~~~~~~
+
+* Removal of legacy mode fixes also :issue:`345`: ``--length`` would not enable
+  legacy mode.
 * The switch to ``dnaio`` also fixed :issue:`275`: Input files with
   non-standard names now no longer lead to a crash. Instead the format
   is now recognized from the file content.
-* Some other performance optimizations were made. Speedups of up to 15%
-  are possible.
-* Fix :issue:`345`: ``--length`` now disables legacy mode.
+* Fix :issue:`354`: Sequences given using ``file:`` can now be unnamed.
+* Fix :issue:`257` and :issue:`242`: When only R1 or only R2 adapters are given, the
+  ``--pair-filter`` setting is now forced to ``both`` for the
+  ``--discard-untrimmed`` (and ``--untrimmed-(paired-)output``) filters.
+  Otherwise, with the default ``--pair-filter=any``, all pairs would be
+  considered untrimmed because one of the reads in the pair is always
+  untrimmed.
+
+Other
+~~~~~
+
+* :issue:`359`: The ``-f``/``--format`` option is now ignored and a warning
+  will be printed if it is used. The input file format is always
+  auto-detected.
 
 
 v1.18 (2018-09-07)
